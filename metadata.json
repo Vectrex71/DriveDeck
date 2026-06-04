@@ -1,0 +1,6 @@
+{
+  "name": "DriveDeck",
+  "description": "DriveDeck ist dein 100% datenschutzfreundliches, serverloses Workspace-Werkzeug für Google Drive-Notizen – komplett offlinefähig und in IndexedDB gesichert.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

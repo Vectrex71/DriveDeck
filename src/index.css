@@ -1,0 +1,18 @@
+@import "tailwindcss";
+
+@theme {
+  --color-notion-bg: #FBFBFA;
+  --color-notion-sidebar: #F7F7F5;
+  --color-notion-border: #EDEDEB;
+  --color-notion-text: #37352F;
+  --color-notion-secondary: #7F7E7B;
+  --color-accent-blue: #2EAADC;
+  
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+}
+
+body {
+  background-color: var(--color-notion-bg);
+  color: var(--color-notion-text);
+  font-family: var(--font-sans);
+}

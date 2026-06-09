@@ -13,6 +13,12 @@ export type BlockType =
   | 'code'
   | 'google-drive';
 
+export interface CalendarSource {
+  id: string;
+  color: string;
+  name?: string;
+}
+
 export interface BlockProperty {
   checked?: boolean;
   fileId?: string;
@@ -20,6 +26,9 @@ export interface BlockProperty {
   mimeType?: string;
   embedUrl?: string;
   language?: string;
+  isVoiceRecorder?: boolean;
+  calendars?: CalendarSource[];
+  orientation?: 'portrait' | 'landscape';
 }
 
 export interface Block {
@@ -37,4 +46,88 @@ export interface WorkspacePage {
   createdAt: number;
   updatedAt: number;
   blocks: Block[];
+  albumId?: string; // Optional ID linking this page to a Project Album
+  isSubscription?: boolean; // If true, this page is downloaded as a read-only subscription
 }
+
+export interface ProjectAlbum {
+  id: string;
+  name: string;
+  createdAt: number;
+  position?: number;
+  pinned?: boolean;
+  color?: string;
+  icon?: string;
+  isSubscription?: boolean; // If true, this project folder is a read-only subscription
+}
+
+export interface StickyAttachment {
+  id: string;
+  type: 'drive' | 'link' | 'image';
+  title: string;
+  url: string;
+  mimeType?: string;
+  fileId?: string;
+}
+
+export interface StickyNoteData {
+  id: string;
+  title: string;
+  content: string;
+  color: 'yellow' | 'green' | 'blue' | 'pink' | 'purple' | 'orange' | 'gray';
+  pinned: boolean;
+  createdAt: number;
+  updatedAt: number;
+  position?: number; // Custom drag-and-drop order ranking
+  tags?: string[];
+  attachments?: StickyAttachment[];
+}
+
+export interface KeepChecklistItem {
+  id: string;
+  text: string;
+  completed: boolean;
+}
+
+export interface KeepNoteData {
+  id: string;
+  title: string;
+  content: string;
+  color?: string; // Tailwind class, e.g., 'bg-amber-100/70 border-amber-200'
+  isPinned?: boolean;
+  isChecklist?: boolean;
+  checklistItems?: KeepChecklistItem[];
+  updatedAt: number;
+}
+
+export interface SubTask {
+  id: string;
+  title: string;
+  completed: boolean;
+  createdAt: number;
+}
+
+export interface Task {
+  id: string;
+  listId: string;
+  title: string;
+  notes: string;
+  completed: boolean;
+  completedAt?: number;
+  dueDate?: string; // YYYY-MM-DD
+  dueTime?: string; // HH:MM
+  recurrence?: 'daily' | 'weekly' | 'monthly' | 'yearly';
+  starred: boolean;
+  subtasks: SubTask[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface TaskList {
+  id: string;
+  name: string;
+  icon?: string;
+  createdAt: number;
+}
+
+

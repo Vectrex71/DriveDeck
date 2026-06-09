@@ -30,6 +30,43 @@ export function openDatabase(): Promise<IDBDatabase> {
   });
 }
 
+export function sanitizePage(page: WorkspacePage): { page: WorkspacePage; changed: boolean } {
+  let changed = false;
+
+  const sanitizeText = (txt: string): string => {
+    if (!txt) return txt;
+    // Replace "Notion Workspace" with "Workspace", "Notion-Klon" with "Workspace" etc.
+    const clean = txt
+      .replace(/Notion Workspace/gi, 'Workspace')
+      .replace(/Notion-Klon/gi, 'Workspace')
+      .replace(/Notion-style/gi, 'blockbasierte')
+      .replace(/Notion/gi, 'Workspace');
+    if (clean !== txt) {
+      changed = true;
+    }
+    return clean;
+  };
+
+  const cleanTitle = sanitizeText(page.title);
+  
+  const cleanBlocks = page.blocks.map(block => {
+    const cleanContent = sanitizeText(block.content);
+    if (cleanContent !== block.content) {
+      return { ...block, content: cleanContent };
+    }
+    return block;
+  });
+
+  return {
+    page: {
+      ...page,
+      title: cleanTitle,
+      blocks: cleanBlocks,
+    },
+    changed,
+  };
+}
+
 export async function getAllPages(): Promise<WorkspacePage[]> {
   const db = await openDatabase();
   return new Promise((resolve, reject) => {
@@ -39,9 +76,18 @@ export async function getAllPages(): Promise<WorkspacePage[]> {
 
     request.onsuccess = () => {
       const pages = request.result as WorkspacePage[];
+      
+      const sanitizedPages = pages.map(p => {
+        const { page: cleanPage, changed } = sanitizePage(p);
+        if (changed) {
+          savePage(cleanPage).catch(err => console.error('Auto-sanitize save failed:', err));
+        }
+        return cleanPage;
+      });
+
       // Sort pages by updatedAt, latest first or simply older first (or sort by when they were created)
-      pages.sort((a, b) => b.createdAt - a.createdAt);
-      resolve(pages);
+      sanitizedPages.sort((a, b) => b.createdAt - a.createdAt);
+      resolve(sanitizedPages);
     };
 
     request.onerror = () => {
@@ -58,7 +104,16 @@ export async function getPageById(id: string): Promise<WorkspacePage | null> {
     const request = store.get(id);
 
     request.onsuccess = () => {
-      resolve(request.result || null);
+      const page = request.result || null;
+      if (page) {
+        const { page: cleanPage, changed } = sanitizePage(page);
+        if (changed) {
+          savePage(cleanPage).catch(err => console.error('Auto-sanitize save failed:', err));
+        }
+        resolve(cleanPage);
+      } else {
+        resolve(null);
+      }
     };
 
     request.onerror = () => {
@@ -112,12 +167,12 @@ export function createWelcomePage(): WorkspacePage {
     {
       id: generateId(),
       type: 'heading1',
-      content: 'Willkommen in deinem privaten Notion Workspace! 🚀',
+      content: 'Willkommen in deinem privaten Workspace! 🚀',
     },
     {
       id: generateId(),
       type: 'text',
-      content: 'Dies ist ein absolut datenschutzfreundlicher, serverloser Notion-Klon, der direkt in deinem Browser läuft. All deine Seiten, Notizen und Strukturen werden lokal über IndexedDB in deinem Browser verschlüsselt gehostet. Es gibt keinen zentralen Server und kein fremdes Auge scannt deine Daten.',
+      content: 'Dies ist ein absolut datenschutzfreundlicher, serverloser Workspace, der direkt in deinem Browser läuft. All deine Seiten, Notizen und Strukturen werden lokal über IndexedDB in deinem Browser verschlüsselt gehostet. Es gibt keinen zentralen Server und kein fremdes Auge scannt deine Daten.',
     },
     {
       id: generateId(),
@@ -180,10 +235,11 @@ console.log("Sichere lokale Seiten:", pages);`,
 
   return {
     id: 'welcome',
-    title: 'Willkommen 👋',
+    title: 'Hier starten 👋',
     icon: '👋',
     createdAt: now,
     updatedAt: now,
     blocks: onboardingBlocks,
+    albumId: 'welcome-project',
   };
 }

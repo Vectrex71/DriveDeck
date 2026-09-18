@@ -160,72 +160,100 @@ export function generateId(): string {
   return Math.random().toString(36).substring(2, 11);
 }
 
-export function createWelcomePage(): WorkspacePage {
+export function createWelcomePage(language: string = 'de'): WorkspacePage {
   const now = Date.now();
+  const isEn = language === 'en';
   
   const onboardingBlocks: Block[] = [
     {
       id: generateId(),
       type: 'heading1',
-      content: 'Willkommen in deinem privaten Workspace! 🚀',
+      content: isEn 
+        ? 'Welcome to your private workspace! 🚀'
+        : 'Willkommen in deinem privaten Workspace! 🚀',
     },
     {
       id: generateId(),
       type: 'text',
-      content: 'Dies ist ein absolut datenschutzfreundlicher, serverloser Workspace, der direkt in deinem Browser läuft. All deine Seiten, Notizen und Strukturen werden lokal über IndexedDB in deinem Browser verschlüsselt gehostet. Es gibt keinen zentralen Server und kein fremdes Auge scannt deine Daten.',
+      content: isEn
+        ? 'This is an absolutely privacy-friendly, serverless workspace that runs directly in your browser. All your pages, notes, and structures are hosted locally inside your browser, encrypted via IndexedDB. There is no central server and no third party scans your data.'
+        : 'Dies ist ein absolut datenschutzfreundlicher, serverloser Workspace, der direkt in deinem Browser läuft. All deine Seiten, Notizen und Strukturen werden lokal über IndexedDB in deinem Browser verschlüsselt gehostet. Es gibt keinen zentralen Server und kein fremdes Auge scannt deine Daten.',
     },
     {
       id: generateId(),
       type: 'heading2',
-      content: 'Das Bring Your Own Cloud-Prinzip ☁️',
+      content: isEn
+        ? 'The Bring Your Own Cloud Principle ☁️'
+        : 'Das Bring Your Own Cloud-Prinzip ☁️',
     },
     {
       id: generateId(),
       type: 'text',
-      content: 'Du möchtest deine Notizen über mehrere Geräte hinweg synchronisieren? Kein Problem! Über die Google Drive-Verbindung kannst du deine unstrukturierten Notizen verschlüsselt in dem versteckten "appdata"-Ordner deines persönlichen Google Drives sichern. So bleibt die Cloud ausschließlich in deiner Hand.',
+      content: isEn
+        ? 'Want to sync your notes across multiple devices? No problem! Via the Google Drive connection, you can back up your unstructured notes encrypted in the hidden "appdata" folder of your personal Google Drive. This keeps the cloud exclusively in your hands.'
+        : 'Du möchtest deine Notizen über mehrere Geräte hinweg synchronisieren? Kein Problem! Über die Google Drive-Verbindung kannst du deine unstrukturierten Notizen verschlüsselt in dem versteckten "appdata"-Ordner deines persönlichen Google Drives sichern. So bleibt die Cloud ausschließlich in deiner Hand.',
     },
     {
       id: generateId(),
       type: 'heading2',
-      content: 'Integration von Google Drive Dateien 📂',
+      content: isEn
+        ? 'Integration of Google Drive Files 📂'
+        : 'Integration von Google Drive Dateien 📂',
     },
     {
       id: generateId(),
       type: 'text',
-      content: 'Du kannst bestehende Google Docs, Tabellenblätter oder PDFs direkt in dein blockbasiertes Interface einbetten! Füge einfach einen Drive Block hinzu und gib die Datei-ID oder den Link ein. Die Datei wird sicher per iFrame gerendert – sie wird niemals eingelesen oder kopiert.',
+      content: isEn
+        ? 'You can embed existing Google Docs, Sheets, or PDFs directly into your block-based interface! Simply add a Drive block and enter the file ID or link. The file will be rendered safely via iframe – it is never read or copied by us.'
+        : 'Du kannst bestehende Google Docs, Tabellenblätter oder PDFs direkt in dein blockbasiertes Interface einbetten! Füge einfach einen Drive Block hinzu und gib die Datei-ID oder den Link ein. Die Datei wird sicher per iFrame gerendert – sie wird niemals eingelesen oder kopiert.',
     },
     {
       id: generateId(),
       type: 'heading3',
-      content: 'Schnelle To-Do Liste für den Start:',
+      content: isEn
+        ? 'Quick To-Do list to get started:'
+        : 'Schnelle To-Do Liste für den Start:',
     },
     {
       id: generateId(),
       type: 'todo',
-      content: 'Erstelle eine neue Seite in der Sidebar auf der linken Seite (+ Neue Seite)',
+      content: isEn
+        ? 'Create a new page in the left sidebar (+ New Page)'
+        : 'Erstelle eine neue Seite in der Sidebar auf der linken Seite (+ Neue Seite)',
       properties: { checked: false },
     },
     {
       id: generateId(),
       type: 'todo',
-      content: 'Erfahre, wie man Blöcke hinzufügt und verschiebt oder löscht',
+      content: isEn
+        ? 'Learn how to add, move, or delete blocks'
+        : 'Erfahre, wie man Blöcke hinzufügt und verschiebt oder löscht',
       properties: { checked: true },
     },
     {
       id: generateId(),
       type: 'todo',
-      content: 'Füge einen Google Drive Block hinzu und integriere ein Dokument deiner Wahl',
+      content: isEn
+        ? 'Add a Google Drive block and integrate a document of your choice'
+        : 'Füge einen Google Drive Block hinzu und integriere ein Dokument deiner Wahl',
       properties: { checked: false },
     },
     {
       id: generateId(),
       type: 'heading3',
-      content: 'Beispiel-Code für Hacker:',
+      content: isEn
+        ? 'Example code for hackers:'
+        : 'Beispiel-Code für Hacker:',
     },
     {
       id: generateId(),
       type: 'code',
-      content: `// 100% Offline-First und Zero-Backend!
+      content: isEn
+        ? `// 100% Offline-First and Zero-Backend!
+const db = openDatabase();
+const pages = await db.getAllPages();
+console.log("Secure local pages:", pages);`
+        : `// 100% Offline-First und Zero-Backend!
 const db = openDatabase();
 const pages = await db.getAllPages();
 console.log("Sichere lokale Seiten:", pages);`,
@@ -235,7 +263,7 @@ console.log("Sichere lokale Seiten:", pages);`,
 
   return {
     id: 'welcome',
-    title: 'Hier starten 👋',
+    title: isEn ? 'Start here 👋' : 'Hier starten 👋',
     icon: '👋',
     createdAt: now,
     updatedAt: now,

@@ -11,20 +11,26 @@ import {
   createWelcomePage, 
   generateId 
 } from './lib/db';
-import { WorkspacePage, Block, ProjectAlbum } from './types';
+import { WorkspacePage, Block, ProjectAlbum, isUserAdmin, ADMIN_EMAILS } from './types';
+import { useLanguage } from './lib/LanguageContext';
 import Sidebar from './components/Sidebar';
 import Editor from './components/Editor';
 import LandingPage from './components/LandingPage';
+import PrivacyPolicyPage from './components/PrivacyPolicyPage';
+import TermsOfServicePage from './components/TermsOfServicePage';
 import StickyNotes from './components/StickyNotes';
 import GoogleTasks from './components/GoogleTasks';
+import KanbanBoard from './components/KanbanBoard';
 import SettingsPage from './components/SettingsPage';
 import Library from './components/Library';
 import Photos from './components/Photos';
-import { HelpCircle, FolderSync, Info, Plus, Sparkles, User, Share2, Loader2, Eye, Edit3, AlertTriangle } from 'lucide-react';
+import { HelpCircle, FolderSync, Info, Plus, Sparkles, User, Share2, Loader2, Eye, Edit3, AlertTriangle, Bell, X } from 'lucide-react';
 import { initAuth, logout, googleSignIn, googleSignInRedirect, handleRedirectResult } from './lib/googleAuth';
-import { executeDriveSync, executeAlbumsSync, sharePageOnDrive, shareAlbumOnDrive, downloadSharedFile } from './lib/driveSync';
+import { executeDriveSync, executeAlbumsSync, sharePageOnDrive, shareAlbumOnDrive, downloadSharedFile, registerDeletedId } from './lib/driveSync';
+import { checkAllDueReminders, ReminderNotificationEvent } from './lib/notificationService';
 
 export default function App() {
+  const { language } = useLanguage();
   const [pages, setPages] = useState<WorkspacePage[]>([]);
   const [activePageId, setActivePageId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -35,14 +41,10 @@ export default function App() {
   const [user, setUser] = useState<any | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [signInError, setSignInError] = useState<{ code?: string; message: string; showRedirectSuggestion?: boolean } | null>(null);
-  const [isPremium, setIsPremium] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem('drivedeck_is_premium') === 'true';
-    } catch {
-      return false;
-    }
-  });
-  const [stripeNotification, setStripeNotification] = useState<{ type: 'success' | 'cancel'; message: string } | null>(null);
+  const [activeReminder, setActiveReminder] = useState<ReminderNotificationEvent | null>(null);
+
+  // Admin status check (hj.wuethrich@gmail.com is registered as System Admin)
+  const isAdmin = isUserAdmin(user?.email) || isUserAdmin(localStorage.getItem('drivedeck_admin_email'));
 
   // Sharing states (Option B)
   const [sharedFileId, setSharedFileId] = useState<string | null>(null);
@@ -97,77 +99,6 @@ export default function App() {
     });
   };
 
-  // Trial limitations states (3 months free, tracked via Google registration creationTime)
-  const [trialDaysLeft, setTrialDaysLeft] = useState<number | null>(null);
-  const [isTrialExpired, setIsTrialExpired] = useState<boolean>(false);
-  const [showTrialPopup, setShowTrialPopup] = useState<boolean>(false);
-  const [trialNotificationType, setTrialNotificationType] = useState<'expired' | 'warning' | null>(null);
-
-  useEffect(() => {
-    if (!user) {
-      setTrialDaysLeft(null);
-      setIsTrialExpired(false);
-      setShowTrialPopup(false);
-      setTrialNotificationType(null);
-      return;
-    }
-
-    // Get creation time or fallback to a local storage timestamp if undefined (to be fully safe)
-    let signupTime = 0;
-    try {
-      if (user.metadata?.creationTime) {
-        signupTime = new Date(user.metadata.creationTime).getTime();
-      }
-    } catch (e) {
-      console.warn('[Sync] Could not parse creationTime:', e);
-    }
-
-    if (signupTime === 0) {
-      // Fallback: Store the first time we see this user to track local trial
-      const key = `drivedeck_signup_time_${user.uid || 'default'}`;
-      const cached = localStorage.getItem(key);
-      if (cached) {
-        signupTime = parseInt(cached, 10);
-      } else {
-        signupTime = Date.now();
-        localStorage.setItem(key, signupTime.toString());
-      }
-    }
-
-    const ninetyDaysMs = 90 * 24 * 60 * 60 * 1000;
-    const elapsedMs = Date.now() - signupTime;
-    const daysLeft = Math.ceil((ninetyDaysMs - elapsedMs) / (24 * 60 * 60 * 1000));
-
-    if (elapsedMs > ninetyDaysMs) {
-      setIsTrialExpired(true);
-      setTrialDaysLeft(0);
-    } else {
-      setIsTrialExpired(false);
-      setTrialDaysLeft(daysLeft > 0 ? daysLeft : 0);
-    }
-  }, [user]);
-
-  // Trigger popup once per session when user, isPremium, and trial calculations are ready
-  useEffect(() => {
-    if (!user || isPremium || trialDaysLeft === null) {
-      return;
-    }
-
-    const sessionKey = `drivedeck_trial_pop_notified_${user.uid || 'default'}`;
-    const alreadyNotified = sessionStorage.getItem(sessionKey);
-    if (alreadyNotified) return;
-
-    if (isTrialExpired) {
-      setTrialNotificationType('expired');
-      setShowTrialPopup(true);
-      sessionStorage.setItem(sessionKey, 'true');
-    } else if (trialDaysLeft <= 30) {
-      setTrialNotificationType('warning');
-      setShowTrialPopup(true);
-      sessionStorage.setItem(sessionKey, 'true');
-    }
-  }, [user, isPremium, trialDaysLeft, isTrialExpired]);
-
   // Albums state initialization and sync with localStorage
   const [albums, setAlbums] = useState<ProjectAlbum[]>(() => {
     try {
@@ -208,56 +139,6 @@ export default function App() {
       }
     } catch (e) {}
   }, [activeAlbumId]);
-
-  // Handle Stripe Session Verification on mount
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const success = params.get('stripe_success') === 'true';
-    const cancel = params.get('stripe_cancel') === 'true';
-    const sessionId = params.get('session_id');
-
-    if (success && sessionId) {
-      setStripeNotification({ type: 'success', message: 'Zahlungsverifizierung läuft...' });
-      
-      fetch(`/api/stripe/verify-session?session_id=${sessionId}`)
-        .then(res => res.json())
-        .then(data => {
-          if (data.success) {
-            setIsPremium(true);
-            try {
-              localStorage.setItem('drivedeck_is_premium', 'true');
-            } catch (e) {}
-            setStripeNotification({ 
-              type: 'success', 
-              message: 'Vielen Dank! Dein Premium-Zugang wurde erfolgreich freigeschaltet.' 
-            });
-          } else {
-            setStripeNotification({ 
-              type: 'cancel', 
-              message: 'Die Verifizierung von Stripe ist fehlgeschlagen oder noch nicht freigegeben.' 
-            });
-          }
-        })
-        .catch(err => {
-          console.error('[Stripe Verifying Interface Error]:', err);
-          setStripeNotification({ 
-            type: 'cancel', 
-            message: 'Es gab ein Problem beim Abfragen deines Checkout-Status.' 
-          });
-        });
-
-      // Maintain a clean address bar without query parameters
-      const cleanUrl = window.location.protocol + "//" + window.location.host + window.location.pathname;
-      window.history.replaceState({ path: cleanUrl }, '', cleanUrl);
-    } else if (cancel) {
-      setStripeNotification({ 
-        type: 'cancel', 
-        message: 'Das Premium-Upgrade wurde abgebrochen.' 
-      });
-      const cleanUrl = window.location.protocol + "//" + window.location.host + window.location.pathname;
-      window.history.replaceState({ path: cleanUrl }, '', cleanUrl);
-    }
-  }, []);
 
   // --- SHARING INTEGRATION (OPTION B) ---
 
@@ -514,13 +395,6 @@ export default function App() {
     if (!token || isLoading) return;
 
     async function runInitialSync() {
-      // Gating check: Active sync requires premium or active trial
-      if (!isPremium && isTrialExpired) {
-        console.warn('[Sync] Trial is expired and user is not Premium. Active sync is skipped.');
-        setSyncStatus('offline');
-        return;
-      }
-
       setSyncStatus('syncing');
       try {
         console.log('[Sync] Initializing automatic sync with Google Drive appDataFolder...');
@@ -540,6 +414,18 @@ export default function App() {
 
         setSyncStatus('synced');
       } catch (err: any) {
+        const isApiDisabled = 
+          err?.message?.includes('SERVICE_DISABLED') ||
+          err?.message?.includes('accessNotConfigured') ||
+          err?.message?.includes('has not been used in project') ||
+          err?.toString()?.includes('SERVICE_DISABLED');
+
+        if (isApiDisabled) {
+          console.warn('[Sync] Google Drive API wird im Cloud-Projekt initialisiert oder ist deaktiviert. Lokaler Offline-Modus aktiv.');
+          setSyncStatus('offline');
+          return;
+        }
+
         setSyncStatus('error');
         
         // Handle unauthorized or invalid tokens automatically
@@ -558,7 +444,7 @@ export default function App() {
     }
 
     runInitialSync();
-  }, [token, isLoading, isPremium, isTrialExpired]);
+  }, [token, isLoading]);
 
   // Synchronize state with popstate browser navigation events
   useEffect(() => {
@@ -569,12 +455,49 @@ export default function App() {
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
+  // Global background check for due Google Tasks & Kanban cards
+  useEffect(() => {
+    // Initial check
+    checkAllDueReminders(language === 'en');
+
+    // Recurring interval every 15 seconds
+    const interval = setInterval(() => {
+      checkAllDueReminders(language === 'en');
+    }, 15000);
+
+    const handleReminderEvent = (e: Event) => {
+      const customEvent = e as CustomEvent<ReminderNotificationEvent>;
+      if (customEvent.detail) {
+        setActiveReminder(customEvent.detail);
+      }
+    };
+
+    window.addEventListener('drivedeck-reminder', handleReminderEvent);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('drivedeck-reminder', handleReminderEvent);
+    };
+  }, [language]);
+
   const navigate = (path: string) => {
     window.history.pushState({}, '', path);
     setCurrentPath(path);
   };
 
   const handleBackgroundSyncError = async (scope: string, syncErr: any) => {
+    const isApiDisabled = 
+      syncErr?.message?.includes('SERVICE_DISABLED') || 
+      syncErr?.message?.includes('accessNotConfigured') || 
+      syncErr?.message?.includes('has not been used in project') ||
+      syncErr?.toString()?.includes('SERVICE_DISABLED');
+
+    if (isApiDisabled) {
+      console.warn(`[Sync] ${scope}: Google Drive API wird im Projekt noch initialisiert. Lokaler Speicher aktiv.`);
+      setSyncStatus('offline');
+      return;
+    }
+
     setSyncStatus('error');
     const isUnauthorized = 
       syncErr?.message?.includes('401') || 
@@ -590,13 +513,7 @@ export default function App() {
   };
 
   const checkSyncAccess = (): boolean => {
-    if (!token) return false;
-    if (!isPremium && isTrialExpired) {
-      console.warn('[Sync] Action skipped on Google Drive because free trial period (3 months) has expired and user is not Premium.');
-      setSyncStatus('offline');
-      return false;
-    }
-    return true;
+    return !!token;
   };
 
   // Initialize and load pages from IndexedDB
@@ -608,7 +525,7 @@ export default function App() {
         
         // Seed database if empty
         if (loadedPages.length === 0) {
-          const welcome = createWelcomePage();
+          const welcome = createWelcomePage(language);
           await savePage(welcome);
           loadedPages = [welcome];
         } else {
@@ -616,7 +533,7 @@ export default function App() {
           let hadMigrated = false;
           for (const page of loadedPages) {
             if (page.id === 'welcome' && (page.title === 'Willkommen' || page.title === 'Willkommen 👋')) {
-              page.title = 'Hier starten 👋';
+              page.title = language === 'en' ? 'Start here 👋' : 'Hier starten 👋';
               hadMigrated = true;
             }
             if (!page.albumId) {
@@ -657,17 +574,100 @@ export default function App() {
     initAndLoad();
   }, []);
 
+  // Sync welcome page language when language preference changes
+  useEffect(() => {
+    if (pages.length === 0 || isLoading) return;
+    
+    const welcomePageIndex = pages.findIndex(p => p.id === 'welcome');
+    if (welcomePageIndex !== -1) {
+      const welcomePage = pages[welcomePageIndex];
+      const isCurrentlyGerman = welcomePage.title === 'Hier starten 👋' || welcomePage.title === 'Willkommen 👋';
+      const isCurrentlyEnglish = welcomePage.title === 'Start here 👋';
+      
+      const shouldBeEnglish = language === 'en';
+      const shouldBeGerman = language === 'de';
+      
+      if ((shouldBeEnglish && isCurrentlyGerman) || (shouldBeGerman && isCurrentlyEnglish)) {
+        const updatedWelcome = createWelcomePage(language);
+        updatedWelcome.createdAt = welcomePage.createdAt;
+        
+        savePage(updatedWelcome).then(() => {
+          setPages(prev => prev.map(p => p.id === 'welcome' ? updatedWelcome : p));
+        }).catch(err => console.error("Error updating welcome page language:", err));
+      }
+    }
+
+    // Also sync default album name (Willkommen <-> Welcome)
+    setAlbums(prevAlbums => {
+      let updated = false;
+      const targetName = language === 'en' ? 'Welcome' : 'Willkommen';
+      const newAlbums = prevAlbums.map(album => {
+        if (album.id === 'welcome-project' || album.name === 'Willkommen' || album.name === 'Welcome') {
+          if (album.name !== targetName) {
+            updated = true;
+            return { ...album, name: targetName };
+          }
+        }
+        return album;
+      });
+      if (updated) {
+        try {
+          localStorage.setItem('drivedeck_project_albums', JSON.stringify(newAlbums));
+        } catch (e) {}
+        return newAlbums;
+      }
+      return prevAlbums;
+    });
+
+    // Also sync uncustomized default blank pages (Neue Seite <-> New Page)
+    setPages(prevPages => {
+      let pagesChanged = false;
+      const targetTitle = language === 'en' ? 'New Page' : 'Neue Seite';
+      const otherTitle = language === 'en' ? 'Neue Seite' : 'New Page';
+      const targetHeading = language === 'en' ? 'New Page 📝' : 'Neue Seite 📝';
+      const otherHeading = language === 'en' ? 'Neue Seite 📝' : 'New Page 📝';
+
+      const updatedPages = prevPages.map(page => {
+        if (page.id === 'welcome') return page;
+        if (page.title === otherTitle || page.title === otherHeading) {
+          pagesChanged = true;
+          const updatedPage = {
+            ...page,
+            title: targetTitle,
+            blocks: page.blocks.map(b => {
+              if (b.type === 'heading1' && (b.content === otherHeading || b.content === otherTitle)) {
+                return { ...b, content: targetHeading };
+              }
+              if (b.type === 'text' && (
+                b.content === 'Schreibe hier etwas nützliches ... Füge neue Blöcke hinzu oder verknüpfe ein Google Drive Dokument am Ende der Seite.' ||
+                b.content === 'Write something useful here ... Add new blocks or connect a Google Drive document at the bottom of the page.'
+              )) {
+                return {
+                  ...b,
+                  content: language === 'en'
+                    ? 'Write something useful here ... Add new blocks or connect a Google Drive document at the bottom of the page.'
+                    : 'Schreibe hier etwas nützliches ... Füge neue Blöcke hinzu oder verknüpfe ein Google Drive Dokument am Ende der Seite.'
+                };
+              }
+              return b;
+            })
+          };
+          savePage(updatedPage).catch(e => console.error("Error saving localized page:", e));
+          return updatedPage;
+        }
+        return page;
+      });
+
+      return pagesChanged ? updatedPages : prevPages;
+    });
+  }, [language, isLoading, pages.length]);
+
   const handleTriggerSyncSetup = () => {
     setShowSyncInfoModal(true);
   };
 
-  // Check if data creation is allowed (trial active or premium subscription active)
+  // Unrestricted data creation for 100% free app
   const checkDataCreationAllowed = (): boolean => {
-    if (!isPremium && isTrialExpired) {
-      setTrialNotificationType('expired');
-      setShowTrialPopup(true);
-      return false;
-    }
     return true;
   };
 
@@ -675,9 +675,10 @@ export default function App() {
   const handleCreatePage = async () => {
     if (!checkDataCreationAllowed()) return;
     const now = Date.now();
+    const isEn = language === 'en';
     const newPage: WorkspacePage = {
       id: generateId(),
-      title: 'Neue Seite',
+      title: isEn ? 'New Page' : 'Neue Seite',
       icon: '📝',
       createdAt: now,
       updatedAt: now,
@@ -686,12 +687,14 @@ export default function App() {
         {
           id: generateId(),
           type: 'heading1',
-          content: 'Neue Seite 📝',
+          content: isEn ? 'New Page 📝' : 'Neue Seite 📝',
         },
         {
           id: generateId(),
           type: 'text',
-          content: 'Schreibe hier etwas nützliches ... Füge neue Blöcke hinzu oder verknüpfe ein Google Drive Dokument am Ende der Seite.',
+          content: isEn
+            ? 'Write something useful here ... Add new blocks or connect a Google Drive document at the bottom of the page.'
+            : 'Schreibe hier etwas nützliches ... Füge neue Blöcke hinzu oder verknüpfe ein Google Drive Dokument am Ende der Seite.',
         }
       ]
     };
@@ -732,6 +735,7 @@ export default function App() {
       async () => {
         try {
           await deletePageFromDB(id);
+          registerDeletedId(id);
           let updatedList = pages.filter(p => p.id !== id);
           
           let finalActivePageId = activePageId;
@@ -879,6 +883,7 @@ export default function App() {
       async () => {
         let fallbackAlbumId = 'welcome-project';
         let updatedAlbums = albums.filter(a => a.id !== albumId);
+        registerDeletedId(albumId);
 
         if (updatedAlbums.length === 0) {
           // Fallback: create a fresh general workspace
@@ -904,6 +909,7 @@ export default function App() {
           const pagesToDelete = pages.filter(p => p.albumId === albumId);
           for (const p of pagesToDelete) {
             await deletePageFromDB(p.id);
+            registerDeletedId(p.id);
           }
           // Remove child pages from state
           updatedPages = pages.filter(p => p.albumId !== albumId);
@@ -1002,10 +1008,22 @@ export default function App() {
   const isWorkspacePath = currentPath.toLowerCase() === '/willkommen';
   const isAuthenticated = !!user && !!token;
 
+  const isPrivacyPath = currentPath.toLowerCase() === '/datenschutz';
+  const isTermsPath = currentPath.toLowerCase() === '/nutzungsbedingungen';
+
+  if (isPrivacyPath) {
+    return <PrivacyPolicyPage onNavigate={navigate} />;
+  }
+
+  if (isTermsPath) {
+    return <TermsOfServicePage onNavigate={navigate} />;
+  }
+
   if (!isWorkspacePath || !isAuthenticated) {
     return (
       <div id="landing-page-root" className="flex h-screen w-screen overflow-hidden bg-slate-50">
         <LandingPage 
+          onNavigate={navigate}
           onConnectDrive={async (method) => {
             setSignInError(null);
             try {
@@ -1022,7 +1040,7 @@ export default function App() {
                   if (loadedPages.length > 0) {
                     pageId = loadedPages[0].id;
                   } else {
-                    const welcome = createWelcomePage();
+                    const welcome = createWelcomePage(language);
                     await savePage(welcome);
                     setPages([welcome]);
                     pageId = welcome.id;
@@ -1032,6 +1050,13 @@ export default function App() {
                 navigate('/Willkommen');
               }
             } catch (e: any) {
+              const isCancelled = 
+                e?.code === 'auth/cancelled-popup-request' ||
+                e?.code === 'auth/popup-closed-by-user';
+              if (isCancelled) {
+                console.log('[Auth] Google Sign-In vom Nutzer abgebrochen oder geschlossen.');
+                return;
+              }
               console.error('Anmeldung fehlgeschlagen:', e);
               setSignInError({
                 code: e?.code || 'auth/unauthorized-domain',
@@ -1162,6 +1187,8 @@ export default function App() {
                   ? 'Haftnotizen'
                   : activePageId === 'tasks'
                   ? 'DriveTasks'
+                  : activePageId === 'kanban'
+                  ? 'Kanban'
                   : activePageId === 'photos'
                   ? 'Fotos'
                   : activePageId === 'settings'
@@ -1197,6 +1224,18 @@ export default function App() {
               <div className="hidden xs:flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
                 <span className="w-1.5 h-1.5 rounded-full bg-rose-500 inline-block"></span>
                 <span>⚠️ Sync-Abbruch</span>
+              </div>
+            )}
+            
+            {/* Administrator VIP badge */}
+            {isAdmin && (
+              <div 
+                onClick={() => setActivePageId('settings')}
+                className="hidden sm:flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-black bg-amber-50 text-amber-900 border border-amber-300 cursor-pointer hover:bg-amber-100 transition-all shadow-3xs"
+                title="System-Administrator (Lebenslang aktiv & kostenlos)"
+              >
+                <span>👑</span>
+                <span>ADMIN</span>
               </div>
             )}
             
@@ -1249,15 +1288,11 @@ export default function App() {
                 onShareAlbum={handleShareAlbum}
               />
             ) : activePageId === 'sticky-notes' ? (
-              <StickyNotes 
-                isCreationBlocked={!isPremium && isTrialExpired}
-                onBlockedCreation={() => {
-                  setTrialNotificationType('expired');
-                  setShowTrialPopup(true);
-                }}
-              />
+              <StickyNotes />
             ) : activePageId === 'tasks' ? (
-              <GoogleTasks showConfirm={showConfirm} />
+              <GoogleTasks token={token} showConfirm={showConfirm} />
+            ) : activePageId === 'kanban' ? (
+              <KanbanBoard token={token} showConfirm={showConfirm} />
             ) : activePageId === 'photos' ? (
               <Photos 
                 token={token}
@@ -1313,16 +1348,6 @@ export default function App() {
                     'Abbrechen'
                   );
                 }}
-                isPremium={isPremium}
-                onResetPremium={() => {
-                  setIsPremium(false);
-                  try {
-                    localStorage.removeItem('drivedeck_is_premium');
-                  } catch (e) {}
-                  setStripeNotification({ type: 'cancel', message: 'Premium-Status erfolgreich zurückgesetzt.' });
-                }}
-                trialDaysLeft={trialDaysLeft}
-                isTrialExpired={isTrialExpired}
               />
             ) : activePage ? (
               <Editor
@@ -1332,19 +1357,21 @@ export default function App() {
               />
             ) : (
               <div className="h-full flex flex-col items-center justify-center text-center p-6 bg-notion-bg">
-                <p className="text-notion-secondary text-xs mb-3">Keine aktive Seite gelistet.</p>
+                <p className="text-notion-secondary text-xs mb-3">
+                  {language === 'en' ? 'No active page selected.' : 'Keine aktive Seite gelistet.'}
+                </p>
                 <div className="flex gap-3 justify-center">
                   <button
                     onClick={() => navigate('/')}
                     className="px-3.5 py-1.5 border border-notion-border text-notion-text rounded-[4px] text-xs font-semibold shadow-xs hover:bg-notion-sidebar cursor-pointer transition-colors"
                   >
-                    🚀 Zur Startseite
+                    {language === 'en' ? '🚀 Go to Home' : '🚀 Zur Startseite'}
                   </button>
                   <button
                     onClick={handleCreatePage}
                     className="px-3.5 py-1.5 bg-accent-blue hover:opacity-90 text-white rounded-[4px] text-xs font-semibold shadow-xs transition-colors cursor-pointer"
                   >
-                    Neue Seite erstellen
+                    {language === 'en' ? 'Create new page' : 'Neue Seite erstellen'}
                   </button>
                 </div>
               </div>
@@ -1404,96 +1431,6 @@ export default function App() {
                 Verstanden, weiter geht's!
               </button>
             </div>
-          </div>
-        </div>
-      )}
-
-      {/* Trial Status Notice Modal */}
-      {showTrialPopup && trialNotificationType && (
-        <div className="fixed inset-0 bg-notion-text/40 flex items-center justify-center p-4 z-55 backdrop-blur-2xs animate-in fade-in transition-all">
-          <div className="bg-white rounded-lg max-w-md w-full p-5 shadow-lg border border-notion-border animate-in zoom-in-95 duration-150">
-            {trialNotificationType === 'expired' ? (
-              <>
-                <div className="flex items-center space-x-2.5 mb-3 text-rose-600">
-                  <FolderSync className="w-6 h-6 animate-pulse" />
-                  <h3 className="text-base font-bold text-notion-text leading-tight">Zahlung erforderlich oder Testphase beendet 📡</h3>
-                </div>
-                
-                <p className="text-xs text-notion-secondary leading-relaxed mb-4 text-left">
-                  Deine Testphase ist beendet oder dein Premium-Abonnement konnte aufgrund eines Zahlungsproblems (z.B. neue/abgelaufene Kreditkarte oder Bankwechsel) vorübergehend nicht erneuert werden. 
-                </p>
-
-                <div className="space-y-2 bg-rose-50/50 p-3.5 rounded border border-rose-100/80 text-xs text-rose-950 mb-4 text-left">
-                  <div className="flex items-start gap-2">
-                    <span className="text-rose-600 select-none">✔</span>
-                    <span><strong>100% Datensicherheit:</strong> Deine bestehenden Notizen und Alben auf Google Drive sowie lokal im Browser bleiben zu 100% sicher und unverändert erhalten! Nichts wird gelöscht.</span>
-                  </div>
-                  <div className="flex items-start gap-2">
-                    <span className="text-rose-600 select-none">✔</span>
-                    <span><strong>Keine neuen Dokumente:</strong> Die Erstellung neuer Seiten, Alben oder Haftnotizen ist vorübergehend gesperrt. Deine Anwendung bleibt in dem aktuellen Zustand wie sie ist.</span>
-                  </div>
-                  <div className="flex items-start gap-2">
-                    <span className="text-rose-600 select-none">✔</span>
-                    <span><strong>Backup &amp; Export:</strong> Du kannst deinen Workspace weiterhin uneingeschränkt ansehen und deine Dokumente lokal als Standard-JSON, Markdown oder PDF exportieren.</span>
-                  </div>
-                </div>
-
-                <div className="flex justify-end space-x-2.5">
-                  <button
-                    onClick={() => setShowTrialPopup(false)}
-                    className="px-3.5 py-1.5 border border-notion-border text-notion-secondary hover:bg-notion-sidebar rounded text-xs font-semibold cursor-pointer transition-colors"
-                  >
-                    Bestehenden Workspace ansehen
-                  </button>
-                  <button
-                    onClick={() => {
-                      setShowTrialPopup(false);
-                      setActivePageId('settings');
-                      navigate('/Willkommen');
-                    }}
-                    className="px-3.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded text-xs font-semibold cursor-pointer transition-all duration-150 shadow-xs"
-                  >
-                    Upgrade-Tarife ansehen
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="flex items-center space-x-2.5 mb-3 text-amber-600">
-                  <FolderSync className="w-6 h-6 animate-pulse" />
-                  <h3 className="text-base font-bold text-notion-text leading-tight font-sans">Deine Testphase läuft bald ab</h3>
-                </div>
-                
-                <p className="text-xs text-notion-secondary leading-relaxed mb-4">
-                  Deine 3-monatige kostenlose Testphase neigt sich dem Ende zu. Du hast aktuell noch <strong className="text-amber-800 font-extrabold">{trialDaysLeft} Tage</strong> übrig, in denen die automatische Echtzeit-Synchronisation aktiv bleibt.
-                </p>
-
-                <div className="space-y-2 bg-amber-50/50 p-3.5 rounded border border-amber-100/80 text-xs text-amber-950 mb-4">
-                  <p className="font-semibold text-amber-900 leading-normal">
-                    Sichere dir dauerhaften, nahtlosen Google Drive Echtzeit-Sync mit unseren flexiblen Premium-Modellen ab 4.90$ / Monat oder als praktischer Einmalkauf.
-                  </p>
-                </div>
-
-                <div className="flex justify-end space-x-2.5">
-                  <button
-                    onClick={() => setShowTrialPopup(false)}
-                    className="px-3.5 py-1.5 border border-notion-border text-notion-secondary hover:bg-notion-sidebar rounded text-xs font-semibold cursor-pointer transition-colors"
-                  >
-                    Später erinnern ({trialDaysLeft} Tage übrig)
-                  </button>
-                  <button
-                    onClick={() => {
-                      setShowTrialPopup(false);
-                      setActivePageId('settings');
-                      navigate('/Willkommen');
-                    }}
-                    className="px-3.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded text-xs font-semibold cursor-pointer transition-all duration-150 shadow-xs"
-                  >
-                    Preise ansehen
-                  </button>
-                </div>
-              </>
-            )}
           </div>
         </div>
       )}
@@ -1971,30 +1908,60 @@ export default function App() {
         </div>
       )}
 
-      {/* Elegant floating Stripe checkout state Notification */}
-      {stripeNotification && (
-        <div className={`fixed bottom-4 right-4 z-[9999] p-4 rounded-xl shadow-xl flex items-center justify-between gap-4 max-w-sm border border-slate-200/60 transition-all animate-in slide-in-from-bottom duration-300 ${
-          stripeNotification.type === 'success'
-            ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-            : 'bg-rose-50 border-rose-200 text-rose-800'
-        }`}>
-          <div className="flex items-start gap-2 text-xs text-left">
-            {stripeNotification.type === 'success' ? (
-              <Sparkles className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-            ) : (
-              <Info className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-            )}
-            <span className="font-semibold leading-relaxed">{stripeNotification.message}</span>
+      {/* Interactive Global Task & Kanban Reminder Toast */}
+      {activeReminder && (
+        <div className="fixed top-5 right-5 z-[9999] p-4 rounded-xl shadow-2xl flex items-start gap-3.5 max-w-sm w-full bg-white border border-amber-300 text-slate-800 transition-all animate-in slide-in-from-top duration-300">
+          <div className="p-2 bg-amber-50 text-amber-600 rounded-lg shrink-0 mt-0.5">
+            <Bell className="w-5 h-5 animate-bounce" />
           </div>
-          <button 
+          <div className="flex-1 min-w-0 text-left">
+            <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-amber-600">
+              <span>{activeReminder.source === 'task' ? 'DriveTasks' : 'Kanban Board'}</span>
+              <span>•</span>
+              <span>{language === 'de' ? 'Jetzt fällig' : 'Due Now'}</span>
+            </div>
+            <h4 className="text-sm font-bold text-slate-900 leading-snug truncate mt-0.5">
+              {activeReminder.title}
+            </h4>
+            {activeReminder.subtitle && (
+              <p className="text-xs text-slate-500 line-clamp-1 mt-0.5">
+                {activeReminder.subtitle}
+              </p>
+            )}
+            <div className="flex items-center gap-2 mt-2.5">
+              <button
+                type="button"
+                onClick={() => {
+                  if (activeReminder.source === 'task') {
+                    setActivePageId('tasks');
+                  } else {
+                    setActivePageId('kanban');
+                  }
+                  setActiveReminder(null);
+                }}
+                className="px-2.5 py-1 bg-sky-600 hover:bg-sky-700 text-white rounded text-xs font-semibold shadow-xs transition-colors cursor-pointer"
+              >
+                {language === 'de' ? 'Jetzt ansehen' : 'View now'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveReminder(null)}
+                className="px-2 py-1 text-slate-500 hover:text-slate-800 text-xs font-medium cursor-pointer"
+              >
+                {language === 'de' ? 'Ausblenden' : 'Dismiss'}
+              </button>
+            </div>
+          </div>
+          <button
             type="button"
-            onClick={() => setStripeNotification(null)}
-            className="text-[10px] font-bold hover:underline opacity-80 cursor-pointer bg-slate-200/80 text-slate-700 hover:bg-slate-300/80 px-2 py-0.5 rounded transition-all shrink-0"
+            onClick={() => setActiveReminder(null)}
+            className="text-slate-400 hover:text-slate-600 p-1 rounded-md cursor-pointer shrink-0"
           >
-            OK
+            <X className="w-4 h-4" />
           </button>
         </div>
       )}
+
     </div>
   );
 }

@@ -24,13 +24,12 @@ const provider = new GoogleAuthProvider();
 // Request ONLY the scopes the user enabled
 provider.addScope('https://www.googleapis.com/auth/drive.appdata');
 provider.addScope('https://www.googleapis.com/auth/drive.file');
-provider.addScope('https://www.googleapis.com/auth/drive.readonly');
 provider.addScope('https://www.googleapis.com/auth/calendar.readonly');
 provider.addScope('https://www.googleapis.com/auth/tasks');
 provider.addScope('https://www.googleapis.com/auth/userinfo.profile');
 provider.addScope('https://www.googleapis.com/auth/userinfo.email');
 
-// Force prompt so the user can easily re-authenticate and get fresh tokens
+// Do not force "consent" every time to prevent annoying Google security warning emails and repetitive permission approval screens.
 provider.setCustomParameters({
   prompt: 'select_account'
 });
@@ -146,6 +145,13 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
 
     return { user: result.user, accessToken: cachedAccessToken };
   } catch (error: any) {
+    const isCancelled = 
+      error?.code === 'auth/cancelled-popup-request' ||
+      error?.code === 'auth/popup-closed-by-user';
+    if (isCancelled) {
+      console.log('[Auth] Google Sign-In Fenster wurde vom Nutzer geschlossen oder abgebrochen.');
+      return null;
+    }
     console.error('Google Sign-In Error:', error);
     throw error;
   } finally {

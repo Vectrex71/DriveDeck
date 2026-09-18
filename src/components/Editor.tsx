@@ -50,14 +50,21 @@ import {
   CloudUpload,
   Edit2,
   Check,
-  Settings2
+  Settings2,
+  AlertTriangle,
+  Globe,
+  Kanban
 } from 'lucide-react';
 import { WorkspacePage, Block, BlockType, CalendarSource } from '../types';
 import { generateId } from '../lib/db';
 import { initAuth, googleSignIn } from '../lib/googleAuth';
+import { launchGooglePicker } from '../lib/googlePicker';
+import firebaseConfig from '../../firebase-applet-config.json';
 import { getOrCreateShareFolder } from '../lib/driveSync';
 import { SecureAudioPlayer, SecureVideoPlayer, SecureImage, SecureAlbum } from './SecureMedia';
 import VoiceRecorder from './VoiceRecorder';
+import EmbeddedKanbanBlock from './EmbeddedKanbanBlock';
+import { useLanguage } from '../lib/LanguageContext';
 import { EMOJI_GROUPS, ALL_EMOJIS_FLAT } from '../data/emojis';
 import { CURATED_BANNERS } from '../data/banners';
 
@@ -82,6 +89,7 @@ const SLASH_OPTIONS = [
   { key: 'text', label: 'Fließtext', sub: 'Normaler Absatz', icon: 'Type', type: 'text' as BlockType, mimeType: undefined },
   { key: 'todo', label: 'Checkliste', sub: 'Aufgaben-Abhakliste', icon: 'CheckSquare', type: 'todo' as BlockType, mimeType: undefined },
   { key: 'bullet', label: 'Aufzählung', sub: 'Einfache ungeordnete Liste', icon: 'List', type: 'bullet' as BlockType, mimeType: undefined },
+  { key: 'kanban', label: 'Kanban Board', sub: 'Projekt-Board mit Spalten & Karten einbetten', icon: 'Kanban', type: 'kanban' as BlockType, mimeType: undefined },
   { key: 'code', label: 'Code Block', sub: 'Interaktives Programmierfeld (IndexedDB)', icon: 'Code', type: 'code' as BlockType, mimeType: undefined },
   
   // Custom Google Embed components requested
@@ -107,6 +115,7 @@ const renderSlashIcon = (iconName: string) => {
     case 'Type': return <Type className="w-4 h-4 text-emerald-500" />;
     case 'CheckSquare': return <CheckSquare className="w-4 h-4 text-sky-500" />;
     case 'List': return <List className="w-4 h-4 text-teal-500" />;
+    case 'Kanban': return <Kanban className="w-4 h-4 text-sky-600" />;
     case 'Code': return <Code className="w-4 h-4 text-indigo-500" />;
     case 'FileText': return <FileText className="w-4 h-4 text-blue-500" />;
     case 'FileSpreadsheet': return <FileSpreadsheet className="w-4 h-4 text-emerald-600" />;
@@ -254,6 +263,7 @@ export default function Editor({
   onOpenPicker,
   showConfirm
 }: EditorProps) {
+  const { language } = useLanguage();
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [emojiSearchQuery, setEmojiSearchQuery] = useState('');
   const [activeEmojiGroupId, setActiveEmojiGroupId] = useState('popular');
@@ -482,14 +492,8 @@ export default function Editor({
   const [token, setToken] = useState<string | null>(null);
   
   // Picker Modal State
-  const [showPickerModal, setShowPickerModal] = useState(false);
-  const [pickerTargetBlockId, setPickerTargetBlockId] = useState<string | null>(null);
-  const [pickerFiles, setPickerFiles] = useState<any[]>([]);
-  const [pickerLoading, setPickerLoading] = useState(false);
-  const [pickerFolderId, setPickerFolderId] = useState<string>('root');
-  const [pickerHistory, setPickerHistory] = useState<Array<{ id: string; name: string }>>([{ id: 'root', name: 'Drive' }]);
-  const [pickerSearch, setPickerSearch] = useState('');
-  const [selectedPickerFile, setSelectedPickerFile] = useState<any | null>(null);
+  const [showPickerApiErrorDetails, setShowPickerApiErrorDetails] = useState(false);
+  const [pickerErrorMessage, setPickerErrorMessage] = useState<string | null>(null);
 
   // Listen for login state in Editor
   useEffect(() => {
@@ -505,44 +509,6 @@ export default function Editor({
     );
     return () => unsubscribe();
   }, []);
-
-  const loadPickerFiles = async (folderId: string, searchVal: string = '') => {
-    if (!token) return;
-    setPickerLoading(true);
-    try {
-      let queryList: string[] = ['trashed = false'];
-      if (searchVal.trim()) {
-        queryList.push(`name contains '${searchVal.replace(/'/g, "\\'")}'`);
-      } else {
-        queryList.push(`'${folderId}' in parents`);
-      }
-      
-      const q = encodeURIComponent(queryList.join(' and '));
-      const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType,createdTime,modifiedTime,thumbnailLink,webViewLink,size)&pageSize=50&orderBy=folder,name`;
-      
-      const res = await fetch(url, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      
-      if (!res.ok) {
-        throw new Error(`Google API status ${res.status}`);
-      }
-      
-      const data = await res.json();
-      setPickerFiles(data.files || []);
-    } catch (err) {
-      console.error('Error loading picker files:', err);
-    } finally {
-      setPickerLoading(false);
-    }
-  };
-
-  // Fetch files when Picker folder changes or search query changes
-  useEffect(() => {
-    if (showPickerModal && token) {
-      loadPickerFiles(pickerFolderId, pickerSearch);
-    }
-  }, [showPickerModal, pickerFolderId, pickerSearch, token]);
 
   const selectDriveFileForBlock = (blockId: string, file: { id: string; name: string; mimeType: string; webViewLink?: string }) => {
     if (blockId === 'page-cover') {
@@ -584,6 +550,46 @@ export default function Editor({
       ...page,
       blocks: updatedBlocks,
       updatedAt: Date.now(),
+    });
+  };
+
+  const openOfficialGooglePicker = (targetBlockId: string) => {
+    if (!token) return;
+    
+    let filter: string | undefined = undefined;
+    if (targetBlockId === 'page-cover') {
+      filter = 'image/*';
+    } else {
+      const block = page.blocks.find(b => b.id === targetBlockId);
+      if (block && block.properties?.mimeType) {
+        const mime = block.properties.mimeType;
+        if (mime === 'image/generic' || mime.startsWith('image/')) {
+          filter = 'image/*';
+        } else if (mime === 'audio/generic' || mime.startsWith('audio/')) {
+          filter = 'audio/*,audio/mpeg,audio/mp3,audio/wav,audio/ogg,audio/aac,audio/flac,audio/x-m4a,audio/mp4';
+        } else if (mime === 'video/generic' || mime.startsWith('video/')) {
+          filter = 'video/*,video/mp4,video/webm';
+        } else {
+          // Keep specific mimeTypes like 'application/vnd.google-apps.document', 'application/vnd.google-apps.spreadsheet', 'application/pdf', etc.
+          filter = mime;
+        }
+      }
+    }
+
+    launchGooglePicker(token, (file) => {
+      // Create properties object to map what block expects
+      const updatedFile = {
+        id: file.id,
+        name: file.name,
+        mimeType: file.mimeType,
+        thumbnailLink: file.mimeType.startsWith('image/') ? file.url : undefined,
+        webViewLink: file.url
+      };
+      selectDriveFileForBlock(targetBlockId, updatedFile as any);
+    }, filter).catch(err => {
+      console.error('Error opening Google Picker:', err);
+      setPickerErrorMessage(err instanceof Error ? err.message : String(err));
+      setShowPickerApiErrorDetails(true);
     });
   };
 
@@ -997,12 +1003,29 @@ export default function Editor({
       };
     }
 
+    // Standardize human input without schema like 'www.google.com' or 'rsser.news' to include 'https://'
+    let urlCandidate = trimmed;
+    if (!urlCandidate.startsWith('http://') && !urlCandidate.startsWith('https://')) {
+      // If it looks like a domain or website url (e.g., has a '.', or has 'www.', or we know customType is 'link/generic')
+      if (customType === 'link/generic' || urlCandidate.startsWith('www.') || /\.[a-z]{2,6}(\/|$)/i.test(urlCandidate)) {
+        urlCandidate = `https://${urlCandidate}`;
+      }
+    }
+
     // Fallback: If it's a generic URL (starts with http/https), treat as generic embed/preview
-    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+    if (urlCandidate.startsWith('http://') || urlCandidate.startsWith('https://')) {
+      // Derive a nice name from hostname if possible
+      let niceName = 'Eingebettete Webseite';
+      try {
+        const parsedUrl = new URL(urlCandidate);
+        const host = parsedUrl.hostname.replace('www.', '');
+        niceName = host.charAt(0).toUpperCase() + host.slice(1);
+      } catch (_) {}
+
       return {
-        fileId: trimmed,
-        embedUrl: trimmed,
-        fileName: 'Eingebettete Webseite',
+        fileId: urlCandidate,
+        embedUrl: urlCandidate,
+        fileName: niceName,
         mimeType: 'link/generic'
       };
     }
@@ -1134,6 +1157,45 @@ export default function Editor({
 
         if (option.type === 'todo') {
           updated.properties = { ...b.properties, checked: false };
+        } else if (option.type === 'kanban') {
+          const isEn = language === 'en';
+          updated.properties = {
+            ...b.properties,
+            kanbanBoard: {
+              id: `board-${Date.now()}`,
+              title: isEn ? 'Project Board' : 'Projekt-Board',
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+              columns: [
+                {
+                  id: `col-${Date.now()}-1`,
+                  title: isEn ? 'To Do' : 'Zu erledigen',
+                  color: 'amber',
+                  cards: [
+                    {
+                      id: `card-${Date.now()}-1`,
+                      title: isEn ? 'Draft first milestone task' : 'Erste Aufgabe formulieren',
+                      priority: 'medium',
+                      createdAt: Date.now(),
+                      updatedAt: Date.now()
+                    }
+                  ]
+                },
+                {
+                  id: `col-${Date.now()}-2`,
+                  title: isEn ? 'In Progress' : 'In Arbeit',
+                  color: 'sky',
+                  cards: []
+                },
+                {
+                  id: `col-${Date.now()}-3`,
+                  title: isEn ? 'Done' : 'Erledigt',
+                  color: 'emerald',
+                  cards: []
+                }
+              ]
+            }
+          };
         } else if (option.type === 'google-drive') {
           updated.properties = {
             ...b.properties,
@@ -1213,7 +1275,7 @@ export default function Editor({
     <div className="w-full flex-1 relative flex flex-col min-h-full">
       {/* Banner Cover Image If It Exists */}
       {page.coverUrl ? (
-        <div className="w-full h-44 sm:h-56 md:h-60 relative overflow-hidden select-none shrink-0 bg-slate-900 border-b border-notion-border/40">
+        <div className="w-full h-44 sm:h-56 md:h-60 relative overflow-hidden select-none shrink-0 bg-slate-900 border-b border-notion-border/40 group/cover">
           {page.coverUrl.startsWith('drive://') ? (
             <SecureCoverImage fileId={page.coverUrl.replace('drive://', '')} token={token} />
           ) : (
@@ -1226,17 +1288,17 @@ export default function Editor({
           )}
           {/* Bottom right hover hotspot area */}
           {!page.isSubscription && (
-            <div className="absolute bottom-0 right-0 p-4 pt-12 pl-12 sm:pt-16 sm:pl-24 group z-20">
-              <div className="flex items-center gap-2 bg-black/20 backdrop-blur-xs border border-white/10 p-1.5 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-500 ease-out delay-500 shadow-sm">
+            <div className="absolute bottom-4 right-4 z-20">
+              <div className="flex items-center gap-2 bg-black/50 backdrop-blur-md border border-white/10 p-1.5 rounded-xl opacity-0 group-hover/cover:opacity-100 focus-within:opacity-100 transition-opacity duration-200 shadow-md">
                 <button
                   onClick={() => setShowCoverSelector(!showCoverSelector)}
-                  className="bg-white/95 text-xs text-slate-800 hover:bg-white border border-slate-200 rounded py-1 px-3 shadow-xs font-semibold cursor-pointer transition-all duration-150"
+                  className="bg-white/95 hover:bg-white text-xs text-slate-800 border border-slate-200 rounded-lg py-1 px-3 shadow-xs font-semibold cursor-pointer transition-all duration-150"
                 >
                   🔄 Cover ändern
                 </button>
                 <button
                   onClick={handleRemoveCover}
-                  className="bg-red-500/90 text-xs text-white hover:bg-red-600 border border-red-605 rounded py-1 px-3 shadow-xs font-semibold cursor-pointer transition-all duration-150"
+                  className="bg-red-500/90 text-xs text-white hover:bg-red-600 border border-red-605 rounded-lg py-1 px-3 shadow-xs font-semibold cursor-pointer transition-all duration-150"
                 >
                   🗑️ Entfernen
                 </button>
@@ -1484,12 +1546,7 @@ export default function Editor({
                     type="button"
                     onClick={async () => {
                       if (token) {
-                        setPickerTargetBlockId('page-cover');
-                        setPickerFolderId('root');
-                        setPickerHistory([{ id: 'root', name: 'Drive' }]);
-                        setPickerSearch('');
-                        setSelectedPickerFile(null);
-                        setShowPickerModal(true);
+                        openOfficialGooglePicker('page-cover');
                         setShowCoverSelector(false);
                       } else {
                         const msg = "Verbinde dich mit Google Drive, um deine dort gespeicherten Bilder direkt als Banner zu wählen. Möchtest du dich anmelden?";
@@ -1499,12 +1556,9 @@ export default function Editor({
                             if (result) {
                               setUser(result.user);
                               setToken(result.accessToken);
-                              setPickerTargetBlockId('page-cover');
-                              setPickerFolderId('root');
-                              setPickerHistory([{ id: 'root', name: 'Drive' }]);
-                              setPickerSearch('');
-                              setSelectedPickerFile(null);
-                              setShowPickerModal(true);
+                              setTimeout(() => {
+                                openOfficialGooglePicker('page-cover');
+                              }, 100);
                               setShowCoverSelector(false);
                             }
                           } catch (err) {
@@ -1575,6 +1629,20 @@ export default function Editor({
 
       {/* Title block with Inline Emoji and title input */}
       <div className="flex flex-col mb-8 relative group">
+        {/* Cover selector hover trigger row */}
+        {!page.isSubscription && !page.coverUrl && (
+          <div className="flex items-center gap-1.5 mb-3.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity duration-200 select-none">
+            <button
+              type="button"
+              onClick={() => setShowCoverSelector(!showCoverSelector)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 hover:bg-slate-100 text-slate-500 hover:text-slate-800 text-xs font-bold rounded-lg border border-slate-200/60 hover:border-slate-350/70 transition-all duration-150 cursor-pointer shadow-3xs select-none"
+            >
+              <span>🖼️</span>
+              <span>Banner Cover hinzufügen</span>
+            </button>
+          </div>
+        )}
+
         <div className="flex items-start gap-4">
           <button
             id="page-icon-selector"
@@ -1598,7 +1666,7 @@ export default function Editor({
             value={page.title}
             onChange={(e) => handleTitleChange(e.target.value)}
             readOnly={page.isSubscription === true}
-            placeholder="Unbenannte Seite"
+            placeholder={language === 'en' ? 'Untitled' : 'Unbenannte Seite'}
             className={`text-4xl font-bold tracking-tight text-notion-text border-none bg-transparent focus:ring-0 focus:outline-none placeholder:text-notion-secondary/30 py-1.5 w-full font-serif ${
               page.isSubscription ? 'cursor-default' : ''
             }`}
@@ -1729,7 +1797,9 @@ export default function Editor({
 
           const isFolder = block.properties?.mimeType === 'application/vnd.google-apps.folder';
 
-          const isDownloadFile = !isAudio && !isVideo && !isYouTube && !isImage && !isDocSheetSlideOrCalendar && !isFolder;
+          const isLink = block.properties?.mimeType === 'link/generic';
+
+          const isDownloadFile = !isAudio && !isVideo && !isYouTube && !isImage && !isDocSheetSlideOrCalendar && !isFolder && !isLink;
 
           // Case-insensitive slash option list filter
           const filteredOptions = SLASH_OPTIONS.filter(opt => 
@@ -1955,6 +2025,22 @@ export default function Editor({
                     </div>
                   )}
 
+                  {block.type === 'kanban' && (
+                    <EmbeddedKanbanBlock
+                      block={block}
+                      onUpdateBlock={(updated) => {
+                        if (page.isSubscription) return;
+                        const updatedBlocks = page.blocks.map(b => (b.id === block.id ? updated : b));
+                        onUpdatePage({
+                          ...page,
+                          blocks: updatedBlocks,
+                          updatedAt: Date.now(),
+                        });
+                      }}
+                      isReadOnly={page.isSubscription === true}
+                    />
+                  )}
+
                   {block.type === 'google-drive' && (
                     <div className={`transition-all duration-200 picker-module group/drive w-full flex flex-col ${
                       block.properties?.fileId && isDownloadFile 
@@ -2010,18 +2096,13 @@ export default function Editor({
                             </div>
 
                             <div className="flex flex-col gap-3 text-center py-2">
-                              {/* Drive Picker/Browsing Section (ONLY if NOT YouTube, NOT Calendar) */}
-                              {block.properties?.mimeType !== 'video/youtube' && block.properties?.mimeType !== 'calendar/google' ? (
+                              {/* Drive Picker/Browsing Section (ONLY if NOT YouTube, NOT Calendar, and NOT Link) */}
+                              {block.properties?.mimeType !== 'video/youtube' && block.properties?.mimeType !== 'calendar/google' && block.properties?.mimeType !== 'link/generic' ? (
                                 <div className="flex flex-col items-center justify-center text-center">
                                   <button
                                     onClick={async () => {
                                       if (token) {
-                                        setPickerTargetBlockId(block.id);
-                                        setPickerFolderId('root');
-                                        setPickerHistory([{ id: 'root', name: 'Drive' }]);
-                                        setPickerSearch('');
-                                        setSelectedPickerFile(null);
-                                        setShowPickerModal(true);
+                                        openOfficialGooglePicker(block.id);
                                       } else {
                                         const msg = "Du bist aktuell nicht angemeldet oder das Token ist abgelaufen. Möchtest du dich per Google anmelden, um dein Drive zu durchsuchen?";
                                         const performSignIn = async () => {
@@ -2029,12 +2110,9 @@ export default function Editor({
                                             const result = await googleSignIn();
                                             if (result) {
                                               setToken(result.accessToken);
-                                              setPickerTargetBlockId(block.id);
-                                              setPickerFolderId('root');
-                                              setPickerHistory([{ id: 'root', name: 'Drive' }]);
-                                              setPickerSearch('');
-                                              setSelectedPickerFile(null);
-                                              setShowPickerModal(true);
+                                              setTimeout(() => {
+                                                openOfficialGooglePicker(block.id);
+                                              }, 100);
                                             }
                                           } catch (err) {
                                             if (showConfirm) {
@@ -2292,9 +2370,10 @@ export default function Editor({
 
                             // Any file that is not directly previewable in-line is handled as a file download link
                             const isFolder = block.properties.mimeType === 'application/vnd.google-apps.folder';
+                            const isLink = block.properties.mimeType === 'link/generic';
 
                             // Any file that is not directly previewable in-line is handled as a file download link
-                            const isDownloadFile = !isAudio && !isVideo && !isYouTube && !isImage && !isDocSheetSlideOrCalendar && !isFolder;
+                            const isDownloadFile = !isAudio && !isVideo && !isYouTube && !isImage && !isDocSheetSlideOrCalendar && !isFolder && !isLink;
 
                             // For Docs, Sheets, Slides, Calendar and Images, we always load immediately!
                             const isLoaded = !!loadedDriveBlocks[block.id] || isDocSheetSlideOrCalendar || isImage;
@@ -2606,6 +2685,68 @@ export default function Editor({
                             const isDoc = block.properties.mimeType === 'application/vnd.google-apps.document';
                             const isSheet = block.properties.mimeType === 'application/vnd.google-apps.spreadsheet';
                             const isCalendar = block.properties.mimeType === 'calendar/google';
+
+                             if (isLink) {
+                               const hostname = (() => {
+                                 try {
+                                   return new URL(block.properties.embedUrl || '').hostname.replace('www.', '');
+                                 } catch (_) {
+                                   return '';
+                                 }
+                               })();
+
+                               const faviconUrl = hostname ? `https://www.google.com/s2/favicons?domain=${hostname}&sz=64` : null;
+
+                               return (
+                                 <div className="w-full font-sans text-left select-none animate-in fade-in duration-300">
+                                   {/* Smart Compact Premium Link Bookmark Card */}
+                                   <a 
+                                     href={block.properties.embedUrl || '#'}
+                                     target="_blank"
+                                     rel="noopener noreferrer"
+                                     className="w-full flex items-center justify-between gap-3 p-3 bg-slate-50 hover:bg-slate-100/70 border border-slate-150 rounded-xl shadow-3xs transition-all duration-200 group/link"
+                                   >
+                                     <div className="flex items-center gap-3 min-w-0 flex-1">
+                                       <div className="w-9 h-9 rounded-lg bg-white border border-slate-200/80 flex items-center justify-center p-1.5 shrink-0 shadow-3xs group-hover/link:border-slate-300/90 transition-colors">
+                                         {faviconUrl ? (
+                                           <img 
+                                             src={faviconUrl} 
+                                             alt="Favicon" 
+                                             className="w-5 h-5 object-contain"
+                                             referrerPolicy="no-referrer"
+                                             onError={(e) => {
+                                               // Fallback to text initials or default globe icon
+                                               (e.target as HTMLElement).style.display = 'none';
+                                             }}
+                                           />
+                                         ) : null}
+                                         <Globe className="w-4 h-4 text-slate-400 group-hover/link:text-sky-500 transition-colors absolute" style={{ zIndex: -1 }} />
+                                       </div>
+                                       <div className="min-w-0 flex-1">
+                                         <h4 className="text-xs font-bold text-slate-755 truncate group-hover/link:text-sky-700 transition-colors" title={block.properties.fileName}>
+                                           {block.properties.fileName || "Webseite"}
+                                         </h4>
+                                         <div className="flex items-center gap-1.5 mt-0.5 min-w-0">
+                                           {hostname && (
+                                             <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wide bg-slate-100 px-1.5 py-0.5 rounded-md shrink-0">
+                                               {hostname}
+                                             </span>
+                                           )}
+                                           <span className="text-[10px] text-slate-405 font-medium truncate max-w-[200px] sm:max-w-[320px]">
+                                             {block.properties.embedUrl}
+                                           </span>
+                                         </div>
+                                       </div>
+                                     </div>
+
+                                     <div className="flex items-center gap-1 shrink-0 px-2 py-1 bg-white hover:bg-slate-50 border border-slate-150 rounded-lg shadow-3xs text-slate-600 group-hover/link:text-sky-600 group-hover/link:border-sky-200 transition-all duration-150">
+                                       <span className="text-[10px] font-bold hidden sm:inline select-none pr-0.5">Besuchen</span>
+                                       <ExternalLink className="w-3 h-3 text-slate-400 group-hover/link:text-sky-500 transition-colors" />
+                                     </div>
+                                   </a>
+                                 </div>
+                               );
+                             }
 
                             if (isCalendar) {
                               const calendars = getBlockCalendars(block);
@@ -2923,215 +3064,87 @@ export default function Editor({
         </div>
       )}
 
-      <div className="mt-14 pb-12 border-t border-notion-border pt-4 flex justify-between items-center text-[11px] text-notion-secondary/75 select-none font-mono">
-        <div>Unterstützt durch IndexedDB</div>
-        <div>Automatische Speicherung erfasst</div>
-      </div>
-
-      {/* PERFECT GOOGLE DRIVE PICKER MODAL */}
-      {showPickerModal && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-[100] p-4 select-none animate-in fade-in duration-200">
-          <div className="bg-white border border-slate-200 w-full max-w-2xl rounded-xl shadow-2xl flex flex-col h-[520px] overflow-hidden">
+      {/* DETAILED GOOGLE PICKER API ERROR HELP MODAL */}
+      {showPickerApiErrorDetails && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-[110] p-4 select-none animate-in fade-in duration-200">
+          <div className="bg-white border border-slate-200 w-full max-w-xl rounded-xl shadow-2xl flex flex-col overflow-hidden">
             {/* Header */}
-            <div className="px-5 py-4 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
-              <div className="flex items-center space-x-2.5">
-                <div className="bg-sky-100 p-1.5 rounded-lg">
-                  <FolderOpen className="w-5 h-5 text-sky-600" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-slate-800">In Google Drive stöbern</h3>
-                  <p className="text-[10px] text-slate-500 font-medium">Binde Dokumente, PDFs, Tabellen oder Medien direkt ein</p>
-                </div>
+            <div className="px-5 py-4 bg-orange-50 border-b border-orange-100 flex items-center space-x-3.5">
+              <div className="bg-orange-100 p-2 rounded-lg text-orange-650 shrink-0">
+                <AlertTriangle className="w-5 h-5 text-orange-600" />
               </div>
-              <button 
-                onClick={() => setShowPickerModal(false)}
-                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Navigation and Search controls */}
-            <div className="p-4 bg-white border-b border-slate-100 flex flex-col sm:flex-row gap-3 items-center justify-between">
-              {/* Breadcrumbs path */}
-              <div className="flex items-center space-x-1.5 text-xs text-slate-600 overflow-x-auto max-w-full no-scrollbar">
-                {pickerHistory.map((item, idx) => (
-                  <React.Fragment key={item.id}>
-                    {idx > 0 && <span className="text-slate-300 font-mono text-[10px]">&gt;</span>}
-                    <button
-                      onClick={() => {
-                        const newHistory = pickerHistory.slice(0, idx + 1);
-                        setPickerHistory(newHistory);
-                        setPickerFolderId(item.id);
-                        setSelectedPickerFile(null);
-                        setPickerSearch('');
-                      }}
-                      className={`hover:text-sky-600 font-semibold cursor-pointer truncate max-w-[100px] py-0.5 px-1 rounded transition-colors ${
-                        idx === pickerHistory.length - 1 ? 'text-sky-600 bg-sky-50' : 'text-slate-500 hover:bg-slate-100'
-                      }`}
-                    >
-                      {item.name}
-                    </button>
-                  </React.Fragment>
-                ))}
-              </div>
-
-              {/* Search bar inside picker */}
-              <div className="relative w-full sm:w-64">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
-                <input
-                  type="text"
-                  placeholder="Konto-Dateien durchsuchen..."
-                  value={pickerSearch}
-                  onChange={(e) => {
-                    setPickerSearch(e.target.value);
-                    setSelectedPickerFile(null);
-                  }}
-                  className="w-full pl-9 pr-8 py-1.5 bg-slate-50 border border-slate-200 focus:border-sky-500 focus:bg-white rounded-md text-xs font-sans placeholder:text-slate-400 focus:outline-none transition-all"
-                />
-                {pickerSearch && (
-                  <button 
-                    onClick={() => setPickerSearch('')}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                )}
+              <div className="font-sans">
+                <h3 className="text-sm font-bold text-slate-800">Google Picker API aktivieren</h3>
+                <p className="text-[10px] text-slate-500 font-medium">Behebt: "The API developer key is invalid"</p>
               </div>
             </div>
 
-            {/* List viewport */}
-            <div className="flex-1 overflow-y-auto p-4 bg-slate-50/50">
-              {pickerLoading ? (
-                <div className="h-full flex flex-col items-center justify-center p-8">
-                  <div className="w-7 h-7 border-2 border-slate-200 border-t-sky-500 rounded-full animate-spin mb-2"></div>
-                  <p className="text-[11px] text-slate-400 font-mono">Lade Google Drive Inhalte ...</p>
-                </div>
-              ) : pickerFiles.length === 0 ? (
-                <div className="h-full flex flex-col items-center justify-center p-8 text-center">
-                  <FolderOpen className="w-10 h-10 text-slate-300 mb-2.5" />
-                  <p className="text-xs font-semibold text-slate-605">Keine Dateien gefunden</p>
-                  <p className="text-[10px] text-slate-400 max-w-xs mt-1 leading-normal">
-                    {pickerSearch ? 'Versuche es mit einem anderen Suchbegriff.' : 'Dieser Ordner ist leer.'}
-                  </p>
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  {pickerFiles.map((file) => {
-                    const isFolder = file.mimeType === 'application/vnd.google-apps.folder';
-                    const isSelected = selectedPickerFile?.id === file.id;
-                    return (
-                      <div
-                        key={file.id}
-                        onDoubleClick={() => {
-                          if (isFolder) {
-                            setPickerHistory([...pickerHistory, { id: file.id, name: file.name }]);
-                            setPickerFolderId(file.id);
-                            setSelectedPickerFile(null);
-                            setPickerSearch('');
-                          } else {
-                            if (pickerTargetBlockId) {
-                              selectDriveFileForBlock(pickerTargetBlockId, file);
-                              setShowPickerModal(false);
-                            }
-                          }
-                        }}
-                        onClick={() => {
-                          setSelectedPickerFile(file);
-                        }}
-                        className={`p-3.5 rounded-lg border flex items-center justify-between cursor-pointer transition-all ${
-                          isSelected
-                            ? 'border-sky-500 bg-sky-50/50 shadow-3xs ring-1 ring-sky-400 font-bold'
-                            : isFolder 
-                            ? 'border-slate-150 bg-slate-50/30 hover:border-sky-300 hover:bg-slate-50/70 hover:shadow-2xs active:scale-[0.99]' 
-                            : 'border-slate-150 bg-white hover:border-sky-200 hover:shadow-3xs'
-                        }`}
-                      >
-                        <div className="flex items-center space-x-3 min-w-0 flex-1">
-                          {isFolder ? (
-                            <div className="p-2 rounded-lg shrink-0 bg-amber-50 text-amber-500">
-                              <Folder className="w-5 h-5 text-amber-500 fill-amber-100" />
-                            </div>
-                          ) : file.thumbnailLink ? (
-                            <div className="w-9 h-9 rounded-lg overflow-hidden shrink-0 border border-slate-150 flex items-center justify-center bg-slate-50">
-                              <img 
-                                src={file.thumbnailLink.replace(/=s\d+/, '=s100')} 
-                                alt={file.name} 
-                                className="w-full h-full object-cover animate-in fade-in duration-200"
-                                referrerPolicy="no-referrer"
-                              />
-                            </div>
-                          ) : (
-                            <div className="p-2 rounded-lg shrink-0 bg-slate-50 text-slate-600">
-                              {file.mimeType.includes('document') ? (
-                                <FileText className="w-5 h-5 text-blue-500" />
-                              ) : file.mimeType.includes('spreadsheet') ? (
-                                <FileSpreadsheet className="w-5 h-5 text-emerald-600" />
-                              ) : file.mimeType.includes('presentation') ? (
-                                <Presentation className="w-5 h-5 text-orange-500" />
-                              ) : file.mimeType.includes('pdf') ? (
-                                <FileText className="w-5 h-5 text-rose-500" />
-                              ) : file.mimeType.startsWith('image/') ? (
-                                <Image className="w-5 h-5 text-[#9C27B0]" />
-                              ) : file.mimeType.startsWith('audio/') ? (
-                                <Music className="w-5 h-5 text-pink-500" />
-                              ) : (
-                                <Paperclip className="w-5 h-5 text-slate-500" />
-                              )}
-                            </div>
-                          )}
-
-                          <div className="min-w-0 pr-2">
-                            <h4 className="text-xs font-bold text-slate-800 truncate leading-snug">{file.name}</h4>
-                            <p className="text-[9px] text-slate-400 truncate mt-0.5 leading-none">
-                              {isFolder ? 'Ordner' : file.mimeType.split('.').pop()?.split('/').pop()}
-                            </p>
-                          </div>
-                        </div>
-
-                        <div className="shrink-0 text-slate-300">
-                          {isFolder ? (
-                            <ChevronRight className="w-4 h-4 text-slate-400" />
-                          ) : isSelected ? (
-                            <span className="text-[10px] font-bold text-[#0288D1] bg-sky-100 px-2 py-0.5 rounded-full select-none">Ausgewählt</span>
-                          ) : null}
-                        </div>
-                      </div>
-                    );
-                  })}
+            {/* Instruction Body */}
+            <div className="p-5 overflow-y-auto max-h-[380px] text-xs text-slate-600 space-y-4 font-sans leading-relaxed">
+              {pickerErrorMessage && (
+                <div className="p-3 bg-red-50 border border-red-150 text-red-700 rounded-lg text-[11px] font-mono whitespace-pre-wrap break-all">
+                  <span className="font-bold font-sans text-xs block mb-1">Detaillierter Systemfehler:</span>
+                  {pickerErrorMessage}
                 </div>
               )}
+
+              <p className="font-medium text-slate-700">
+                Der offizielle Google Picker läuft im geschützten Google-Sicherheitsrahmen. Dadurch bleibt deine App in der Kategorie <b>"Nicht-sensibel" (Non-sensitive / drive.file)</b>. Das bedeutet für dich:
+              </p>
+              
+              <ul className="list-disc pl-5 space-y-1 text-slate-650">
+                <li><b>Keine CASA-Zertifizierungskosten</b> (spart $15k-$75k/Jahr)</li>
+                <li>Deine Nutzer können trotzdem <b>alle ihre Dateien & Kalender</b> sicher durchsuchen!</li>
+              </ul>
+
+              <div className="border-t border-slate-100 pt-3 space-y-3">
+                <div className="flex items-start gap-2.5">
+                  <span className="bg-sky-100 text-[#0288D1] font-extrabold w-5 h-5 rounded-full flex items-center justify-center shrink-0 text-[11px] font-mono leading-none">1</span>
+                  <div>
+                    <span className="font-bold text-slate-800 block">Google Picker API aktivieren</span>
+                    Suche in deiner <a href={`https://console.cloud.google.com/apis/library/picker.googleapis.com?project=${(import.meta as any).env.VITE_GOOGLE_PICKER_PROJECT_ID || firebaseConfig.projectId}`} target="_blank" rel="noopener noreferrer" className="text-sky-600 hover:underline font-bold">Google Cloud-Konsole (hier klicken)</a> nach der <b>"Google Picker API"</b> und klicke auf <b>Aktivieren (Enable)</b> für dein Cloud-Projekt (<code>{(import.meta as any).env.VITE_GOOGLE_PICKER_PROJECT_ID || firebaseConfig.projectId}</code>).
+                    <div className="mt-1.5 p-2 bg-amber-50 border border-amber-200 rounded-md text-[10.5px] text-amber-800 leading-normal font-sans">
+                      <b>WICHTIG (Eigenes Google Cloud Projekt):</b> Da diese Preview-App standardmäßig in einer geschützten AI Studio-Sandbox läuft, kannst du das Standardprojekt nicht selbst verwalten. Wenn du die API auf deinem <b>eigenen Google Cloud-Projekt</b> aktiviert hast, trage deinen API-Schlüssel einfach als <code>VITE_GOOGLE_PICKER_API_KEY</code> and deine Project ID als <code>VITE_GOOGLE_PICKER_PROJECT_ID</code> in den App-Einstellungen (Secrets / Umgebungsvariablen) links in der Seitenleiste ein!
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-start gap-2.5">
+                  <span className="bg-sky-100 text-[#0288D1] font-extrabold w-5 h-5 rounded-full flex items-center justify-center shrink-0 text-[11px] font-mono leading-none">2</span>
+                  <div>
+                    <span className="font-bold text-slate-800 block">API-Schlüssel Einschränkungen freigeben</span>
+                    Gehe im Cloud Menü auf <b>APIs & Dienste &gt; Anmeldedaten (Credentials)</b>. Wähle deinen aktiven API-Schlüssel aus. 
+                    Stelle sicher, dass unter <b>"API-Einschränkungen"</b> entweder <i>"Schlüssel nicht einschränken"</i> ausgewählt ist, oder füge die <b>"Google Picker API"</b> und <b>"Google Drive API"</b> explizit zu den zugelassenen APIs hinzu!
+                  </div>
+                </div>
+
+                <div className="flex items-start gap-2.5">
+                  <span className="bg-sky-100 text-[#0288D1] font-extrabold w-5 h-5 rounded-full flex items-center justify-center shrink-0 text-[11px] font-mono leading-none">3</span>
+                  <div>
+                    <span className="font-bold text-slate-800 block">HTTP-Referrer-Beschränkung (optional)</span>
+                    Falls dein API-Schlüssel auf HTTP-Referrer beschränkt ist, stelle sicher, dass die Domain deines Applet-Previews (z.B. <code>*.europe-west3.run.app</code>) in den erlaubten Websites gelistet ist.
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-emerald-50 border border-emerald-100 p-3 rounded-lg text-[11px] text-emerald-800 leading-normal">
+                <span className="font-bold block mb-0.5">💡 Warum das ein Geniestreich ist:</span>
+                Sobald deine Nutzer über diesen offiziellen Picker eine Datei heraussuchen, delegiert Google der App das Recht für <b>nur diese spezifische Datei</b>. Deine App sammelt so keine globalen Rechte und gilt vor Google als völlig unbedenklich.
+              </div>
             </div>
 
             {/* Footer */}
-            <div className="px-5 py-4 bg-slate-50 border-t border-slate-100 flex items-center justify-between">
-              <span className="text-[10px] text-slate-400 font-medium">
-                Tipp: Doppelklicke auf Ordner zum Öffnen, doppelklicke auf Dateien zum direkten Verlinken.
-              </span>
-              <div className="flex space-x-2">
-                <button
-                  onClick={() => setShowPickerModal(false)}
-                  className="px-4 py-1.5 border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold rounded-md text-xs cursor-pointer transition-colors"
-                >
-                  Abbrechen
-                </button>
-                <button
-                  disabled={!selectedPickerFile}
-                  onClick={() => {
-                    if (selectedPickerFile && pickerTargetBlockId) {
-                      selectDriveFileForBlock(pickerTargetBlockId, selectedPickerFile);
-                      setShowPickerModal(false);
-                    }
-                  }}
-                  className={`px-4.5 py-1.5 text-white font-semibold rounded-md text-xs transition-all shadow-3xs ${
-                    selectedPickerFile 
-                      ? 'bg-[#0288D1] hover:opacity-95 cursor-pointer' 
-                      : 'bg-slate-300 pointer-events-none text-slate-100'
-                  }`}
-                >
-                  Auswählen
-                </button>
-              </div>
+            <div className="px-5 py-4 bg-slate-50 border-t border-slate-100 flex justify-end">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowPickerApiErrorDetails(false);
+                  setPickerErrorMessage(null);
+                }}
+                className="px-5 py-2 bg-sky-600 hover:bg-sky-700 text-white font-semibold rounded-md text-xs cursor-pointer shadow-3xs hover:shadow-2xs active:scale-98 transition-all font-sans"
+              >
+                Verstanden
+              </button>
             </div>
           </div>
         </div>

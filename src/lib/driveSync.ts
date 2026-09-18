@@ -3,12 +3,50 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { WorkspacePage, StickyNoteData, ProjectAlbum, KeepNoteData, Task, TaskList } from '../types';
+import { WorkspacePage, StickyNoteData, ProjectAlbum, KeepNoteData, Task, TaskList, KanbanBoardData } from '../types';
+
+export function registerDeletedId(id: string) {
+  try {
+    const raw = localStorage.getItem('drivedeck_deleted_ids');
+    const ids: string[] = raw ? JSON.parse(raw) : [];
+    if (!ids.includes(id)) {
+      ids.push(id);
+      localStorage.setItem('drivedeck_deleted_ids', JSON.stringify(ids));
+    }
+  } catch (err) {
+    console.error('Failed to register deleted ID:', err);
+  }
+}
+
+export function isIdDeleted(id: string): boolean {
+  try {
+    const raw = localStorage.getItem('drivedeck_deleted_ids');
+    if (!raw) return false;
+    const ids: string[] = JSON.parse(raw);
+    return ids.includes(id);
+  } catch {
+    return false;
+  }
+}
+
+export function isDriveApiDisabledError(err: any): boolean {
+  if (!err) return false;
+  const str = typeof err === 'string' ? err : (err?.message || JSON.stringify(err) || '');
+  return (
+    str.includes('accessNotConfigured') ||
+    str.includes('SERVICE_DISABLED') ||
+    str.includes('Google Drive API has not been used in project') ||
+    str.includes('disabled. Enable it by visiting')
+  );
+}
 
 export function logSyncError(scope: string, err: any) {
   const is401 = err?.message?.includes('401') || err?.toString()?.includes('401');
+  const isApiDisabled = isDriveApiDisabledError(err);
   if (is401) {
     console.warn(`[DriveSync] ${scope}: Token expired or unauthorized (401). Gracious handling active.`, err);
+  } else if (isApiDisabled) {
+    console.warn(`[DriveSync] ${scope}: Google Drive API wird im Google Cloud Projekt initialisiert. Lokaler IndexedDB Speicher aktiv.`);
   } else {
     console.error(`[DriveSync] ${scope}:`, err);
   }
@@ -34,6 +72,10 @@ async function locateSyncFile(token: string): Promise<string | null> {
     });
 
     if (!res.ok) {
+      const errText = await res.text();
+      if (res.status === 403 && isDriveApiDisabledError(errText)) {
+        throw new Error(`SERVICE_DISABLED: Google Drive API has not been enabled yet on the Cloud project.`);
+      }
       throw new Error(`Failed to locate sync file. HTTP ${res.status}`);
     }
 
@@ -103,6 +145,10 @@ async function createSyncFile(token: string, pages: WorkspacePage[]): Promise<st
     });
 
     if (!res.ok) {
+      const errText = await res.text();
+      if (res.status === 403 && isDriveApiDisabledError(errText)) {
+        throw new Error(`SERVICE_DISABLED: Google Drive API has not been enabled yet on the Cloud project.`);
+      }
       throw new Error(`Failed to create sync file. HTTP ${res.status}`);
     }
 
@@ -158,6 +204,12 @@ export function mergePages(local: WorkspacePage[], remote: WorkspacePage[]): Syn
   let driveUpdated = false;
 
   for (const id of allIds) {
+    if (isIdDeleted(id)) {
+      if (remoteMap.has(id)) {
+        driveUpdated = true;
+      }
+      continue;
+    }
     const locPage = localMap.get(id);
     const remPage = remoteMap.get(id);
 
@@ -236,6 +288,14 @@ export async function executeDriveSync(
 
     return stats;
   } catch (err) {
+    if (isDriveApiDisabledError(err)) {
+      console.warn('[DriveSync] Drive API ist im Projekt noch nicht aktiviert. Workspace arbeitet lokal weiter.');
+      return {
+        pages: localPages,
+        localUpdated: false,
+        driveUpdated: false
+      };
+    }
     logSyncError('Synchronization failed', err);
     throw err;
   }
@@ -377,6 +437,12 @@ export function mergeStickyNotes(local: StickyNoteData[], remote: StickyNoteData
   let driveUpdated = false;
 
   for (const id of allIds) {
+    if (isIdDeleted(id)) {
+      if (remoteMap.has(id)) {
+        driveUpdated = true;
+      }
+      continue;
+    }
     const locNote = localMap.get(id);
     const remNote = remoteMap.get(id);
 
@@ -475,6 +541,10 @@ async function locateAlbumsSyncFile(token: string): Promise<string | null> {
     });
 
     if (!res.ok) {
+      const errText = await res.text();
+      if (res.status === 403 && isDriveApiDisabledError(errText)) {
+        throw new Error(`SERVICE_DISABLED: Google Drive API is not activated.`);
+      }
       throw new Error(`Failed to locate albums sync file. HTTP ${res.status}`);
     }
 
@@ -544,6 +614,10 @@ async function createAlbumsSyncFile(token: string, albums: ProjectAlbum[]): Prom
     });
 
     if (!res.ok) {
+      const errText = await res.text();
+      if (res.status === 403 && isDriveApiDisabledError(errText)) {
+        throw new Error(`SERVICE_DISABLED: Google Drive API is not activated.`);
+      }
       throw new Error(`Failed to create albums sync file. HTTP ${res.status}`);
     }
 
@@ -596,6 +670,12 @@ export function mergeAlbums(local: ProjectAlbum[], remote: ProjectAlbum[]): {
   let driveUpdated = false;
 
   for (const id of allIds) {
+    if (isIdDeleted(id)) {
+      if (remoteMap.has(id)) {
+        driveUpdated = true;
+      }
+      continue;
+    }
     const locAlbum = localMap.get(id);
     const remAlbum = remoteMap.get(id);
 
@@ -673,6 +753,14 @@ export async function executeAlbumsSync(
 
     return stats;
   } catch (err) {
+    if (isDriveApiDisabledError(err)) {
+      console.warn('[DriveSync] Drive API ist noch nicht aktiviert. Projektalben arbeiten lokal weiter.');
+      return {
+        albums: localAlbums,
+        localUpdated: false,
+        driveUpdated: false
+      };
+    }
     console.error('[DriveSync] Synchronization of albums failed:', err);
     throw err;
   }
@@ -814,6 +902,12 @@ export function mergeKeepNotes(local: KeepNoteData[], remote: KeepNoteData[]): {
   let driveUpdated = false;
 
   for (const id of allIds) {
+    if (isIdDeleted(id)) {
+      if (remoteMap.has(id)) {
+        driveUpdated = true;
+      }
+      continue;
+    }
     const locNote = localMap.get(id);
     const remNote = remoteMap.get(id);
 
@@ -1039,6 +1133,12 @@ export function mergeTasksAndLists(
   const mergedLists: TaskList[] = [];
 
   for (const id of allListIds) {
+    if (isIdDeleted(id)) {
+      if (remoteListsMap.has(id)) {
+        driveUpdated = true;
+      }
+      continue;
+    }
     const locList = localListsMap.get(id);
     const remList = remoteListsMap.get(id);
 
@@ -1068,6 +1168,12 @@ export function mergeTasksAndLists(
   const mergedTasks: Task[] = [];
 
   for (const id of allTaskIds) {
+    if (isIdDeleted(id)) {
+      if (remoteTasksMap.has(id)) {
+        driveUpdated = true;
+      }
+      continue;
+    }
     const locTask = localTasksMap.get(id);
     const remTask = remoteTasksMap.get(id);
 
@@ -1099,7 +1205,8 @@ export function mergeTasksAndLists(
 }
 
 /**
- * Synchronizes Task lists and Tasks with Google Drive appDataFolder.
+ * @deprecated DriveTasks has been replaced with the official Google Tasks API integration (googleTasksClient.ts).
+ * This function is kept for backwards compatibility and data migration.
  */
 export async function executeTasksSync(
   token: string,
@@ -1348,6 +1455,203 @@ export async function downloadSharedFile(token: string, fileId: string): Promise
     return await res.json();
   } catch (err) {
     console.error('[DriveSync] Error downloading shared file:', err);
+    throw err;
+  }
+}
+
+/**
+ * Searches for 'drivedeck_kanban_boards.json' in appDataFolder
+ */
+async function locateKanbanSyncFile(token: string): Promise<string | null> {
+  try {
+    const q = encodeURIComponent("name = 'drivedeck_kanban_boards.json' and trashed = false");
+    const url = `https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${q}&fields=files(id,name)&pageSize=1`;
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.files && data.files.length > 0 ? data.files[0].id : null;
+  } catch (err) {
+    console.error('[DriveSync] Failed locating kanban sync file:', err);
+    return null;
+  }
+}
+
+/**
+ * Reads kanban boards from appDataFolder
+ */
+async function readKanbanSyncFile(token: string, fileId: string): Promise<KanbanBoardData[]> {
+  try {
+    const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!res.ok) throw new Error(`Failed to download kanban sync file: ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    console.error('[DriveSync] Error reading kanban sync file:', err);
+    throw err;
+  }
+}
+
+/**
+ * Creates kanban boards file in appDataFolder
+ */
+async function createKanbanSyncFile(token: string, boards: KanbanBoardData[]): Promise<string> {
+  try {
+    const metadata = {
+      name: 'drivedeck_kanban_boards.json',
+      parents: ['appDataFolder']
+    };
+    const boundary = 'drivedeck_kanban_boundary';
+    const body = 
+      `--${boundary}\r\n` +
+      `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+      `${JSON.stringify(metadata)}\r\n` +
+      `--${boundary}\r\n` +
+      `Content-Type: application/json\r\n\r\n` +
+      `${JSON.stringify(boards)}\r\n` +
+      `--${boundary}--`;
+
+    const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': `multipart/related; boundary=${boundary}`
+      },
+      body
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      if (res.status === 403 && isDriveApiDisabledError(errText)) {
+        throw new Error(`SERVICE_DISABLED: Google Drive API is not activated.`);
+      }
+      throw new Error(`Failed to create kanban sync file. HTTP ${res.status} - ${errText}`);
+    }
+
+    const data = await res.json();
+    return data.id;
+  } catch (err) {
+    console.error('[DriveSync] Error creating kanban sync file:', err);
+    throw err;
+  }
+}
+
+/**
+ * Updates kanban boards file in appDataFolder
+ */
+async function updateKanbanSyncFile(token: string, fileId: string, boards: KanbanBoardData[]): Promise<void> {
+  try {
+    const url = `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`;
+    const res = await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(boards)
+    });
+
+    if (!res.ok) {
+      throw new Error(`Failed to update kanban sync file. HTTP ${res.status}`);
+    }
+  } catch (err) {
+    console.error('[DriveSync] Error updating kanban sync file:', err);
+    throw err;
+  }
+}
+
+/**
+ * Merges local and remote kanban boards
+ */
+export function mergeKanbanBoards(local: KanbanBoardData[], remote: KanbanBoardData[]): {
+  boards: KanbanBoardData[];
+  localUpdated: boolean;
+  driveUpdated: boolean;
+} {
+  const localMap = new Map(local.map(b => [b.id, b]));
+  const remoteMap = new Map(remote.map(b => [b.id, b]));
+  const allIds = new Set([...localMap.keys(), ...remoteMap.keys()]);
+
+  const merged: KanbanBoardData[] = [];
+  let localUpdated = false;
+  let driveUpdated = false;
+
+  for (const id of allIds) {
+    if (isIdDeleted(id)) {
+      if (remoteMap.has(id)) {
+        driveUpdated = true;
+      }
+      continue;
+    }
+
+    const l = localMap.get(id);
+    const r = remoteMap.get(id);
+
+    if (l && !r) {
+      merged.push(l);
+      driveUpdated = true;
+    } else if (!l && r) {
+      merged.push(r);
+      localUpdated = true;
+    } else if (l && r) {
+      if (l.updatedAt > r.updatedAt) {
+        merged.push(l);
+        driveUpdated = true;
+      } else if (r.updatedAt > l.updatedAt) {
+        merged.push(r);
+        localUpdated = true;
+      } else {
+        merged.push(l);
+      }
+    }
+  }
+
+  merged.sort((a, b) => b.updatedAt - a.updatedAt);
+  return { boards: merged, localUpdated, driveUpdated };
+}
+
+/**
+ * Executes Kanban boards sync with Google Drive appDataFolder
+ */
+export async function executeKanbanSync(
+  token: string,
+  localBoards: KanbanBoardData[],
+  forceOverwriteDrive: boolean = false
+): Promise<{ boards: KanbanBoardData[]; localUpdated: boolean; driveUpdated: boolean }> {
+  try {
+    const fileId = await locateKanbanSyncFile(token);
+
+    if (!fileId) {
+      await createKanbanSyncFile(token, localBoards);
+      return { boards: localBoards, localUpdated: false, driveUpdated: true };
+    }
+
+    if (forceOverwriteDrive) {
+      await updateKanbanSyncFile(token, fileId, localBoards);
+      return { boards: localBoards, localUpdated: false, driveUpdated: true };
+    }
+
+    const remoteBoards = await readKanbanSyncFile(token, fileId);
+    const { boards: merged, localUpdated, driveUpdated } = mergeKanbanBoards(localBoards, remoteBoards);
+
+    if (driveUpdated) {
+      await updateKanbanSyncFile(token, fileId, merged);
+    }
+
+    return { boards: merged, localUpdated, driveUpdated };
+  } catch (err) {
+    if (isDriveApiDisabledError(err)) {
+      console.warn('[DriveSync] Drive API ist noch nicht aktiviert. Kanban-Boards arbeiten lokal weiter.');
+      return {
+        boards: localBoards,
+        localUpdated: false,
+        driveUpdated: false
+      };
+    }
+    console.error('[DriveSync] executeKanbanSync error:', err);
     throw err;
   }
 }

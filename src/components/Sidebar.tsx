@@ -22,9 +22,11 @@ import {
   BookMarked,
   Pin,
   Camera,
-  Share2
+  Share2,
+  Kanban
 } from 'lucide-react';
 import { WorkspacePage, ProjectAlbum } from '../types';
+import { useLanguage } from '../lib/LanguageContext';
 
 interface SidebarProps {
   pages: WorkspacePage[];
@@ -69,6 +71,7 @@ export default function Sidebar({
   onSharePage,
   onShareAlbum,
 }: SidebarProps) {
+  const { language } = useLanguage();
   const [searchQuery, setSearchQuery] = useState('');
   const [showAddAlbum, setShowAddAlbum] = useState(false);
   const [newAlbumName, setNewAlbumName] = useState('');
@@ -92,7 +95,14 @@ export default function Sidebar({
   });
 
   const activeAlbum = albums.find(a => a.id === activeAlbumId);
-  const activeSectionLabel = activeAlbum ? `Seiten in "${activeAlbum.name}"` : 'Seiten';
+  const activeAlbumDisplayName = activeAlbum 
+    ? (activeAlbum.id === 'welcome-project' || activeAlbum.name === 'Willkommen' || activeAlbum.name === 'Welcome'
+        ? (language === 'en' ? 'Welcome' : 'Willkommen')
+        : activeAlbum.name)
+    : null;
+  const activeSectionLabel = activeAlbumDisplayName 
+    ? (language === 'en' ? `Pages in "${activeAlbumDisplayName}"` : `Seiten in "${activeAlbumDisplayName}"`) 
+    : (language === 'en' ? 'Pages' : 'Seiten');
 
   return (
     <>
@@ -200,7 +210,7 @@ export default function Sidebar({
             }`}
           >
             <BookMarked className="w-4 h-4 text-[#0288D1] shrink-0" />
-            <span className="font-bold">Bibliothek</span>
+            <span className="font-bold">{language === 'en' ? 'Library' : 'Bibliothek'}</span>
           </button>
 
           <button
@@ -213,7 +223,7 @@ export default function Sidebar({
             }`}
           >
             <StickyNote className="w-4 h-4 text-[#0288D1] shrink-0" />
-            <span className="font-bold">Haftnotizen</span>
+            <span className="font-bold">{language === 'en' ? 'Notes' : 'Haftnotizen'}</span>
           </button>
 
           <button
@@ -226,7 +236,20 @@ export default function Sidebar({
             }`}
           >
             <CheckSquare className="w-4 h-4 text-[#0288D1] shrink-0" />
-            <span className="font-bold">DriveTasks</span>
+            <span className="font-bold">Google Tasks</span>
+          </button>
+
+          <button
+            id="open-kanban-btn"
+            onClick={() => onSelectPage('kanban')}
+            className={`w-full flex items-center space-x-2.5 px-2.5 py-2 text-xs font-semibold rounded-[4px] transition-all cursor-pointer ${
+              activePageId === 'kanban'
+                ? 'bg-sky-500/10 text-[#0288D1] border border-sky-400/20 shadow-3xs'
+                : 'text-slate-700 bg-slate-50 border border-slate-200/60 hover:bg-slate-100 hover:border-slate-300'
+            }`}
+          >
+            <Kanban className="w-4 h-4 text-[#0288D1] shrink-0" />
+            <span className="font-bold">Kanban</span>
           </button>
 
           <button
@@ -239,17 +262,17 @@ export default function Sidebar({
             }`}
           >
             <Camera className="w-4 h-4 text-[#0288D1] shrink-0" />
-            <span className="font-bold">Fotos</span>
+            <span className="font-bold">{language === 'en' ? 'Photos' : 'Fotos'}</span>
           </button>
         </div>
 
         {/* Project Albums Title Bar */}
         <div className="flex items-center justify-between px-4 pt-3 pb-1 text-[11px] font-bold text-notion-secondary uppercase tracking-wider select-none border-t border-notion-border/30 mt-1">
-          <span>Projekt-Shortcuts</span>
+          <span>{language === 'en' ? 'Project Shortcuts' : 'Projekt-Shortcuts'}</span>
           <button
             onClick={() => setShowAddAlbum(!showAddAlbum)}
             className="p-1 hover:text-notion-text hover:bg-[rgba(0,0,0,0.04)] rounded transition-colors cursor-pointer"
-            title="Neues Projektalbum erstellen"
+            title={language === 'en' ? 'Create new project album' : 'Neues Projektalbum erstellen'}
           >
             <Plus className="w-3.5 h-3.5" />
           </button>
@@ -260,7 +283,7 @@ export default function Sidebar({
           <div className="mx-3 my-1.5 p-2 bg-slate-50 border border-slate-200/80 rounded-[4px] space-y-2 animate-in slide-in-from-top-2 duration-150">
             <input
               type="text"
-              placeholder="Projektname..."
+              placeholder={language === 'en' ? 'Project name...' : 'Projektname...'}
               value={newAlbumName}
               onChange={(e) => setNewAlbumName(e.target.value)}
               className="w-full text-xs bg-white border border-slate-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-accent-blue"
@@ -273,7 +296,7 @@ export default function Sidebar({
                 }}
                 className="px-2 py-0.5 text-[10px] font-semibold text-slate-500 hover:text-slate-700 bg-white border border-slate-200 rounded cursor-pointer"
               >
-                Abbrechen
+                {language === 'en' ? 'Cancel' : 'Abbrechen'}
               </button>
               <button
                 onClick={() => {
@@ -285,7 +308,7 @@ export default function Sidebar({
                 }}
                 className="px-2 py-0.5 text-[10px] font-bold text-white bg-[#0288D1] hover:opacity-95 rounded cursor-pointer shadow-3xs"
               >
-                Hinzufügen
+                {language === 'en' ? 'Add' : 'Hinzufügen'}
               </button>
             </div>
           </div>
@@ -362,9 +385,13 @@ export default function Sidebar({
                     {album.icon || '📁'}
                   </span>
                   <span className="truncate flex items-center gap-1">
-                    {album.name}
+                    {album.id === 'welcome-project' || album.name === 'Willkommen' || album.name === 'Welcome'
+                      ? (language === 'en' ? 'Welcome' : 'Willkommen')
+                      : album.name}
                     {album.isSubscription && (
-                      <span className="text-[8px] bg-sky-100 text-[#0288D1] px-1 py-0.2 rounded font-sans shrink-0 font-bold tracking-tight">Abo</span>
+                      <span className="text-[8px] bg-sky-100 text-[#0288D1] px-1 py-0.2 rounded font-sans shrink-0 font-bold tracking-tight">
+                        {language === 'en' ? 'Sub' : 'Abo'}
+                      </span>
                     )}
                   </span>
                 </div>
@@ -410,7 +437,7 @@ export default function Sidebar({
             <Search className="absolute left-2.5 top-2.5 w-3.5 h-3.5 text-notion-secondary" />
             <input
               type="text"
-              placeholder="Suchen..."
+              placeholder={language === 'en' ? 'Search...' : 'Suchen...'}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="w-full pl-8 pr-2.5 py-1 text-xs bg-white border border-notion-border rounded-md text-notion-text placeholder-notion-secondary/60 focus:outline-none focus:ring-1 focus:ring-accent-blue focus:border-transparent transition-all"
@@ -425,7 +452,7 @@ export default function Sidebar({
             id="create-new-page-btn"
             onClick={onCreatePage}
             className="p-1 hover:text-notion-text hover:bg-[rgba(0,0,0,0.04)] rounded transition-colors cursor-pointer shrink-0"
-            title="Neue Seite erstellen"
+            title={language === 'en' ? 'Create new page' : 'Neue Seite erstellen'}
           >
             <Plus className="w-3.5 h-3.5" />
           </button>
@@ -435,11 +462,24 @@ export default function Sidebar({
         <div className="flex-1 overflow-y-auto px-2 space-y-0.5">
           {filteredPages.length === 0 ? (
             <div className="px-3 py-4 text-xs text-notion-secondary text-center italic">
-              Keine Seiten
+              {language === 'en' ? 'No pages' : 'Keine Seiten'}
             </div>
           ) : (
             filteredPages.map((page) => {
               const isActive = page.id === activePageId;
+              const displayTitle = () => {
+                if (page.id === 'welcome') {
+                  return language === 'en' ? 'Start here 👋' : 'Hier starten 👋';
+                }
+                if (language === 'en' && (page.title === 'Neue Seite' || page.title === 'Neue Seite 📝')) {
+                  return 'New Page';
+                }
+                if (language === 'de' && (page.title === 'New Page' || page.title === 'New Page 📝')) {
+                  return 'Neue Seite';
+                }
+                return page.title || (language === 'en' ? 'Untitled' : 'Unbenannt');
+              };
+
               return (
                 <div
                   key={page.id}
@@ -458,9 +498,11 @@ export default function Sidebar({
                   <div className="flex items-center space-x-2 min-w-0 flex-1">
                     <span className="text-sm select-none flex-shrink-0">{page.icon || '📄'}</span>
                     <span className="truncate flex items-center gap-1">
-                      {page.title || 'Unbenannt'}
+                      {displayTitle()}
                       {page.isSubscription && (
-                        <span className="text-[8px] bg-sky-100 text-[#0288D1] px-1 py-0.2 rounded font-sans shrink-0 font-bold tracking-tight">Abo</span>
+                        <span className="text-[8px] bg-sky-100 text-[#0288D1] px-1 py-0.2 rounded font-sans shrink-0 font-bold tracking-tight">
+                          {language === 'en' ? 'Sub' : 'Abo'}
+                        </span>
                       )}
                     </span>
                   </div>
@@ -474,7 +516,7 @@ export default function Sidebar({
                           onSharePage(page.id);
                         }}
                         className="opacity-100 lg:opacity-0 lg:group-hover:opacity-100 p-1 text-slate-400 hover:text-sky-600 hover:bg-[rgba(0,0,0,0.06)] rounded transition-all cursor-pointer"
-                        title="Andere dieses Dokument abonnieren lassen"
+                        title={language === 'en' ? 'Share this document for subscription' : 'Andere dieses Dokument abonnieren lassen'}
                       >
                         <Share2 className="w-3.5 h-3.5" />
                       </button>
@@ -488,7 +530,7 @@ export default function Sidebar({
                         onDeletePage(page.id);
                       }}
                       className="opacity-100 lg:opacity-0 lg:group-hover:opacity-100 p-1 text-slate-400 hover:text-red-600 hover:bg-[rgba(0,0,0,0.06)] rounded transition-all cursor-pointer"
-                      title={page.isSubscription ? "Abonnement beenden" : "Seite löschen"}
+                      title={page.isSubscription ? (language === 'en' ? 'Cancel subscription' : 'Abonnement beenden') : (language === 'en' ? 'Delete page' : 'Seite löschen')}
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
@@ -506,7 +548,7 @@ export default function Sidebar({
             className="flex-1 flex items-center space-x-2 text-xs text-notion-secondary hover:text-notion-text p-1.5 rounded-[4px] hover:bg-[rgba(0,0,0,0.04)] cursor-pointer"
           >
             <Plus className="w-4 h-4" />
-            <span>Neue Seite</span>
+            <span>{language === 'en' ? 'New Page' : 'Neue Seite'}</span>
           </button>
           
           <button
@@ -516,7 +558,7 @@ export default function Sidebar({
                 ? 'bg-sky-500/10 text-[#0288D1] border-sky-400/20 shadow-3xs'
                 : 'text-notion-secondary hover:text-[#0288D1] bg-slate-50 border-slate-200/60 hover:bg-slate-100 hover:border-slate-300'
             }`}
-            title="Profil & Einstellungen öffnen"
+            title={language === 'en' ? 'Open settings & profile' : 'Profil & Einstellungen öffnen'}
           >
             <Settings className="w-4 h-4" />
           </button>

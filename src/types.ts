@@ -11,12 +11,44 @@ export type BlockType =
   | 'todo'
   | 'bullet'
   | 'code'
-  | 'google-drive';
+  | 'google-drive'
+  | 'kanban';
 
 export interface CalendarSource {
   id: string;
   color: string;
   name?: string;
+}
+
+export interface KanbanCard {
+  id: string;
+  title: string;
+  description?: string;
+  priority?: 'low' | 'medium' | 'high' | 'urgent';
+  color?: string; // Color key: sky, emerald, amber, rose, purple, slate
+  dueDate?: string; // YYYY-MM-DD
+  dueTime?: string; // HH:MM
+  tags?: string[];
+  checklists?: { id: string; text: string; completed: boolean }[];
+  assignee?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface KanbanColumn {
+  id: string;
+  title: string;
+  color?: string;
+  cards: KanbanCard[];
+}
+
+export interface KanbanBoardData {
+  id: string;
+  title: string;
+  description?: string;
+  columns: KanbanColumn[];
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface BlockProperty {
@@ -29,6 +61,7 @@ export interface BlockProperty {
   isVoiceRecorder?: boolean;
   calendars?: CalendarSource[];
   orientation?: 'portrait' | 'landscape';
+  kanbanBoard?: KanbanBoardData;
 }
 
 export interface Block {
@@ -128,6 +161,14 @@ export interface TaskList {
   name: string;
   icon?: string;
   createdAt: number;
+}
+
+export const ADMIN_EMAILS: string[] = ['hj.wuethrich@gmail.com'];
+
+export function isUserAdmin(email?: string | null): boolean {
+  if (!email) return false;
+  const normalized = email.trim().toLowerCase();
+  return ADMIN_EMAILS.some(adminEmail => adminEmail.toLowerCase() === normalized);
 }
 
 

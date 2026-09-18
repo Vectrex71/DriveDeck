@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   Check, 
   Plus, 
@@ -24,12 +24,27 @@ import {
   FileText,
   Clock,
   X,
-  Play,
-  Repeat
+  Repeat,
+  RefreshCw,
+  ExternalLink,
+  CheckCircle2,
+  AlertCircle
 } from 'lucide-react';
 
 import { Task, TaskList, SubTask } from '../types';
-import { executeTasksSync } from '../lib/driveSync';
+import { 
+  fetchGoogleTaskLists, 
+  createGoogleTaskList, 
+  updateGoogleTaskList, 
+  deleteGoogleTaskList,
+  fetchGoogleTasksInList,
+  insertGoogleTask,
+  updateGoogleTask,
+  deleteGoogleTask,
+  clearCompletedGoogleTasks,
+  GoogleApiTaskList,
+  GoogleApiTask
+} from '../lib/googleTasksClient';
 
 // Preset emojis for custom task lists
 const PRESET_EMOJIS = [
@@ -43,7 +58,7 @@ const PRESET_EMOJIS = [
   '🏠', '🏡', '🛋️', '🛌', '🧹', '🧼', '🧺', '🔧', '🔨', '🛠️', '🚗', '🛵', '🚲', '🛒', '🛍️', '📦', '📬', '🪴', '🌱', '🌸', '🐾', '🐶', '🐱',
   
   // Hobbys, Kreativität & Freizeit
-  '🎨', '🎵', '🎸', '🎹', '📷', '🎬', '🎮', '🧩', '🧶', '🧵', '🎭', '🎪', '🎲', '🎳', '🎯', '🛹', 
+  '🎨', '🎵', '🎸', '🎹', '📷', '🎬', '🎮', '🧩', '🧶', '🧵', '🎭', '🎪', '🎲', '🎳', '🛹', 
   
   // Gesundheit, Sport & Wellness
   '🧘', '🏋️', '🏃', '🚴', '🏊', '🧗', '🏄', '🏌️', '⚽', '🏀', '🍎', '🥦', '🍕', '☕', '🥤', '🍷', '🍺', '🧴', '🛀', '💤',
@@ -57,7 +72,6 @@ const PRESET_EMOJIS = [
 
 // Helper to extract any leading emoji or symbol from text
 const extractLeadingEmoji = (text: string): { emoji: string; cleanText: string } => {
-  // Matches typical emojis at the start of string
   const emojiRegex = /^([\u{1F300}-\u{1F9FF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{2600}-\u{27BF}\u{1F1E6}-\u{1F1FF}\u{1F900}-\u{1F9FF}\u{1F300}-\u{1F5FF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F191}-\u{1F251}☑️]+)\s*/u;
   const match = text.match(emojiRegex);
   if (match) {
@@ -66,7 +80,6 @@ const extractLeadingEmoji = (text: string): { emoji: string; cleanText: string }
     return { emoji, cleanText };
   }
   
-  // Custom check for known emoji prefixes
   for (const sym of PRESET_EMOJIS) {
     if (text.startsWith(sym)) {
       return { emoji: sym, cleanText: text.slice(sym.length).trim() };
@@ -90,7 +103,6 @@ const getListDetails = (list: TaskList): { icon: string; name: string } => {
       icon = '📋';
     }
   } else {
-    // If we have an icon, remove duplicates from start of name
     const extracted = extractLeadingEmoji(name);
     if (extracted.emoji === icon) {
       name = extracted.cleanText;
@@ -100,7 +112,134 @@ const getListDetails = (list: TaskList): { icon: string; name: string } => {
   return { icon, name };
 };
 
+// Metadata parsing helper: allows star, recurrence, and dueTime to sync seamlessly with Google Tasks notes
+interface ParsedNotes {
+  cleanNotes: string;
+  starred: boolean;
+  recurrence?: 'daily' | 'weekly' | 'monthly' | 'yearly';
+  dueTime?: string;
+}
+
+const parseGoogleTaskNotes = (rawNotes?: string): ParsedNotes => {
+  if (!rawNotes) {
+    return { cleanNotes: '', starred: false };
+  }
+
+  let text = rawNotes;
+  let starred = false;
+  let recurrence: 'daily' | 'weekly' | 'monthly' | 'yearly' | undefined = undefined;
+  let dueTime: string | undefined = undefined;
+
+  // Check metadata block [DriveDeck: starred=true, recurrence=daily, time=14:30]
+  const metaMatch = text.match(/\[DriveDeck:\s*([^\]]+)\]/i);
+  if (metaMatch) {
+    const parts = metaMatch[1].split(',').map(s => s.trim());
+    for (const part of parts) {
+      const [k, v] = part.split('=').map(s => s.trim().toLowerCase());
+      if (k === 'starred' && v === 'true') starred = true;
+      if (k === 'recurrence' && ['daily', 'weekly', 'monthly', 'yearly'].includes(v)) {
+        recurrence = v as any;
+      }
+      if (k === 'time' && /^\d{1,2}:\d{2}$/.test(v)) {
+        dueTime = v;
+      }
+    }
+    // Remove meta tag from clean displayed text
+    text = text.replace(/\[DriveDeck:\s*[^\]]+\]\n?/i, '').trim();
+  }
+
+  // Also support simple legacy hashtag markers if present
+  if (text.includes('#starred') || text.includes('⭐')) {
+    starred = true;
+  }
+
+  return { cleanNotes: text, starred, recurrence, dueTime };
+};
+
+const serializeGoogleTaskNotes = (
+  cleanNotes: string, 
+  starred: boolean, 
+  recurrence?: 'daily' | 'weekly' | 'monthly' | 'yearly', 
+  dueTime?: string
+): string => {
+  const metaParts: string[] = [];
+  if (starred) metaParts.push('starred=true');
+  if (recurrence && recurrence !== ('none' as any)) metaParts.push(`recurrence=${recurrence}`);
+  if (dueTime) metaParts.push(`time=${dueTime}`);
+
+  const trimmed = cleanNotes.trim();
+  if (metaParts.length === 0) {
+    return trimmed;
+  }
+
+  const metaBlock = `[DriveDeck: ${metaParts.join(', ')}]`;
+  return trimmed ? `${trimmed}\n\n${metaBlock}` : metaBlock;
+};
+
+// Map Google API task list item to TaskList
+const mapApiTaskListToLocal = (apiList: GoogleApiTaskList): TaskList => {
+  const extracted = extractLeadingEmoji(apiList.title);
+  return {
+    id: apiList.id,
+    name: apiList.title,
+    icon: extracted.emoji || '📋',
+    createdAt: apiList.updated ? new Date(apiList.updated).getTime() : Date.now()
+  };
+};
+
+// Map Google API task items to Task array (parent tasks with hierarchical subtasks)
+const mapApiTasksToLocal = (apiTasks: GoogleApiTask[], listId: string): Task[] => {
+  // First pass: identify parents and subtasks (parent points to parent task ID)
+  const parents: GoogleApiTask[] = [];
+  const subtaskMap = new Map<string, GoogleApiTask[]>();
+
+  for (const item of apiTasks) {
+    if (item.deleted || item.hidden) continue;
+    if (item.parent) {
+      const subs = subtaskMap.get(item.parent) || [];
+      subs.push(item);
+      subtaskMap.set(item.parent, subs);
+    } else {
+      parents.push(item);
+    }
+  }
+
+  return parents.map(item => {
+    const parsed = parseGoogleTaskNotes(item.notes);
+    const subs = (subtaskMap.get(item.id) || []).map(sub => ({
+      id: sub.id,
+      title: sub.title || 'Unteraufgabe',
+      completed: sub.status === 'completed',
+      createdAt: sub.updated ? new Date(sub.updated).getTime() : Date.now()
+    }));
+
+    let dueDate: string | undefined = undefined;
+    if (item.due) {
+      try {
+        dueDate = item.due.split('T')[0];
+      } catch {}
+    }
+
+    return {
+      id: item.id,
+      listId,
+      title: item.title || '',
+      notes: parsed.cleanNotes,
+      completed: item.status === 'completed',
+      completedAt: item.completed ? new Date(item.completed).getTime() : undefined,
+      dueDate,
+      dueTime: parsed.dueTime,
+      starred: parsed.starred,
+      recurrence: parsed.recurrence,
+      subtasks: subs,
+      createdAt: item.updated ? new Date(item.updated).getTime() : Date.now(),
+      updatedAt: item.updated ? new Date(item.updated).getTime() : Date.now()
+    };
+  });
+};
+
 interface GoogleTasksProps {
+  token?: string | null;
   showConfirm?: (
     title: string,
     message: string,
@@ -111,16 +250,17 @@ interface GoogleTasksProps {
   ) => void;
 }
 
-export default function GoogleTasks({ showConfirm }: GoogleTasksProps = {}) {
+export default function GoogleTasks({ token: propToken, showConfirm }: GoogleTasksProps = {}) {
   // 1. Core State
   const [lists, setLists] = useState<TaskList[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [activeListId, setActiveListId] = useState<string>('');
 
-  // Google Drive Cloud Sync state
+  // Live Token & API Sync state
+  const [authToken, setAuthToken] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'synced' | 'error'>('idle');
-  const [driveToken, setDriveToken] = useState<string | null>(null);
-  const skipSyncRef = useRef<boolean>(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [isInitialLoading, setIsInitialLoading] = useState<boolean>(true);
 
   // Push Notifications state
   const [pushPermission, setPushPermission] = useState<string>(() => {
@@ -181,319 +321,45 @@ export default function GoogleTasks({ showConfirm }: GoogleTasksProps = {}) {
   // Expanding subtasks state mapping: { [taskId]: boolean }
   const [expandedSubtasks, setExpandedSubtasks] = useState<Record<string, boolean>>({});
 
-  // 3. Load from LocalStorage
+  // Resolve active token (prop or sessionStorage)
   useEffect(() => {
-    let initialLists: TaskList[] = [];
-    let initialTasks: Task[] = [];
-    try {
-      // Load Lists
-      const storedLists = localStorage.getItem('drivedeck_task_lists');
-      if (storedLists) {
-        initialLists = JSON.parse(storedLists);
-      } else {
-        // Seed lists
-        initialLists = [
-          { id: 'list-default', name: '☑️ Meine Aufgaben', createdAt: Date.now() },
-          { id: 'list-work', name: '💼 Arbeit & Kanzlei', createdAt: Date.now() - 10000 },
-          { id: 'list-private', name: '🏠 Privat', createdAt: Date.now() - 20000 }
-        ];
-        localStorage.setItem('drivedeck_task_lists', JSON.stringify(initialLists));
-      }
-      setLists(initialLists);
+    const resolved = propToken || sessionStorage.getItem('drive_access_token');
+    setAuthToken(resolved);
+  }, [propToken]);
 
-      // Set active list
-      const lastActiveListId = localStorage.getItem('drivedeck_last_active_task_list');
-      if (lastActiveListId && initialLists.some(l => l.id === lastActiveListId)) {
-        setActiveListId(lastActiveListId);
-      } else if (initialLists.length > 0) {
-        setActiveListId(initialLists[0].id);
-      }
-
-      // Load tasks
-      const storedTasks = localStorage.getItem('drivedeck_tasks_data');
-      if (storedTasks) {
-        initialTasks = JSON.parse(storedTasks);
-        let updated = false;
-        initialTasks = initialTasks.map((t: Task) => {
-          if (t.title && t.title.includes('Google Tasks')) {
-            updated = true;
-            return {
-              ...t,
-              title: t.title.replace('Google Tasks', 'DriveTasks')
-            };
-          }
-          return t;
-        });
-        if (updated) {
-          try {
-            localStorage.setItem('drivedeck_tasks_data', JSON.stringify(initialTasks));
-          } catch {}
-        }
-        setTasks(initialTasks);
-      } else {
-        // Seed tasks
-        initialTasks = [
-          {
-            id: 'task-1',
-            listId: 'list-default',
-            title: 'Willkommen bei DriveTasks! 🎉',
-            notes: 'Dieser Bereich ist dein voll ausgestattetes Werkzeug für deine To-Do-Listen im Browser.',
-            completed: false,
-            starred: true,
-            subtasks: [
-              { id: 'sub-1', title: 'Erstelle eigene Listen links im Panel', completed: false, createdAt: Date.now() },
-              { id: 'sub-2', title: 'Nutze Fälligkeitsdaten & Notizen für Fokus', completed: true, createdAt: Date.now() - 5000 }
-            ],
-            createdAt: Date.now(),
-            updatedAt: Date.now()
-          },
-          {
-            id: 'task-2',
-            listId: 'list-default',
-            title: 'Bündele wichtige Notizen & Details',
-            notes: 'Klicke auf eine Aufgabe, um den eleganten Detail-Editor auf der rechten Seite zu öffnen! Dort kannst du zusätzliche Notizen erfassen und Teilaufgaben steuern.',
-            completed: false,
-            dueDate: new Date().toISOString().split('T')[0],
-            starred: false,
-            subtasks: [],
-            createdAt: Date.now() - 20000,
-            updatedAt: Date.now() - 20000
-          },
-          {
-            id: 'task-3',
-            listId: 'list-default',
-            title: 'Höre den Erledigt-Sound 🛎️',
-            notes: 'Erledige eine Aufgabe durch Klicken auf den Kreis links. Ein feiner, synthetischer Chime-Sound ertönt zur mentalen Belohnung!',
-            completed: true,
-            completedAt: Date.now(),
-            starred: false,
-            subtasks: [],
-            createdAt: Date.now() - 50000,
-            updatedAt: Date.now() - 50000
-          }
-        ];
-        setTasks(initialTasks);
-        localStorage.setItem('drivedeck_tasks_data', JSON.stringify(initialTasks));
-      }
-    } catch (e) {
-      console.error('Failed to load DriveTasks state:', e);
-    }
-
-    // Google Drive Pull-Sync
-    const token = sessionStorage.getItem('drive_access_token');
-    if (token) {
-      setDriveToken(token);
-      setSyncStatus('syncing');
-      executeTasksSync(token, initialLists, initialTasks)
-        .then((stats) => {
-          if (stats.localUpdated || stats.driveUpdated) {
-            skipSyncRef.current = true;
-            if (stats.lists.length > 0) {
-              setLists(stats.lists);
-              localStorage.setItem('drivedeck_task_lists', JSON.stringify(stats.lists));
-              
-              if (!stats.lists.some(l => l.id === activeListId)) {
-                setActiveListId(stats.lists[0].id);
-              }
-            }
-            setTasks(stats.tasks);
-            localStorage.setItem('drivedeck_tasks_data', JSON.stringify(stats.tasks));
-          }
-          setSyncStatus('synced');
-        })
-        .catch((err) => {
-          console.error('[DriveSync] Initial Tasks pull sync failed:', err);
-          setSyncStatus('error');
-        });
-    }
-  }, []);
-
-  // Debounced cloud synchronization trigger
-  useEffect(() => {
-    if (!driveToken) return;
-    
-    if (skipSyncRef.current) {
-      skipSyncRef.current = false;
-      return;
-    }
-
-    const timer = setTimeout(() => {
-      setSyncStatus('syncing');
-      executeTasksSync(driveToken, lists, tasks)
-        .then((stats) => {
-          if (stats.localUpdated) {
-            skipSyncRef.current = true;
-            if (stats.lists.length > 0) {
-              setLists(stats.lists);
-              localStorage.setItem('drivedeck_task_lists', JSON.stringify(stats.lists));
-            }
-            setTasks(stats.tasks);
-            localStorage.setItem('drivedeck_tasks_data', JSON.stringify(stats.tasks));
-          }
-          setSyncStatus('synced');
-        })
-        .catch((err) => {
-          console.error('[DriveSync] Auto tasks sync failed:', err);
-          setSyncStatus('error');
-        });
-    }, 1500);
-
-    return () => clearTimeout(timer);
-  }, [lists, tasks, driveToken]);
-
-  // Request notification permission flow
-  const requestPushPermission = async () => {
-    if (typeof window === 'undefined' || !('Notification' in window)) {
-      alert("Browser-Push-Benachrichtigungen werden von diesem Browser nicht unterstützt.");
-      return;
-    }
-
-    try {
-      const permission = await Notification.requestPermission();
-      setPushPermission(permission);
-
-      if (permission === 'granted') {
-        const newToast = {
-          id: 'push-success-' + Date.now(),
-          message: '🔔 Push-Benachrichtigungen erfolgreich aktiviert!',
-          type: 'success' as const
-        };
-        setToasts(prev => [newToast, ...prev]);
-
-        new Notification("Aktiviert! 🔔", {
-          body: "Du wirst ab jetzt pünktlich an fällige Aufgaben erinnert.",
-          icon: '/favicon.ico'
-        });
-
-        synthCompleteChime();
-      } else {
-        const newToast = {
-          id: 'push-denied-' + Date.now(),
-          message: '❌ Blockiert! Bitte erlaube Benachrichtigungen im Browser.',
-          type: 'info' as const
-        };
-        setToasts(prev => [newToast, ...prev]);
-      }
-    } catch (err) {
-      console.error('Error requesting notification permission:', err);
-    }
+  // Toast notification helper
+  const showToast = (message: string, type: 'success' | 'info' | 'star' = 'info') => {
+    const id = Math.random().toString(36).substr(2, 9);
+    setToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id));
+    }, 3800);
   };
 
-  // Run a reminder clock to check for due tasks
-  useEffect(() => {
-    const checkDueReminders = () => {
-      const now = new Date();
-      // Year-Month-Day formatted matching task date format
-      const dateStr = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
-      const timeStr = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
-
-      tasks.forEach(task => {
-        if (task.completed || !task.dueDate || !task.dueTime) return;
-
-        // Compare date and time strings directly
-        if (task.dueDate === dateStr && task.dueTime === timeStr) {
-          if (notifiedTaskIds.includes(task.id)) return;
-
-          setNotifiedTaskIds(prev => {
-            const next = [...prev, task.id];
-            try {
-              localStorage.setItem('drivedeck_notified_tasks', JSON.stringify(next));
-            } catch {}
-            return next;
-          });
-
-          // Play rewarding Bell synthesis
-          synthCompleteChime();
-
-          // Push immediate in-app alarm Toast
-          const newToast = {
-            id: 'reminder-' + Date.now() + '-' + task.id,
-            message: `⏰ Fällig: "${task.title}"`,
-            type: 'info' as const
-          };
-          setToasts(prev => [newToast, ...prev]);
-
-          // Browser system push notification
-          if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
-            try {
-              new Notification("DriveTasks Erinnerung! ⏰", {
-                body: `Die Aufgabe "${task.title}" ist jetzt fällig.${task.notes ? '\n\nNotizen: ' + task.notes : ''}`,
-                icon: '/favicon.ico'
-              });
-            } catch (err) {
-              console.error('Browser notice failure:', err);
-            }
-          }
-        }
-      });
-    };
-
-    checkDueReminders();
-    const clockInterval = setInterval(checkDueReminders, 15000); // Check every 15s for extra precision
-    return () => clearInterval(clockInterval);
-  }, [tasks, notifiedTaskIds, soundEnabled]);
-
-  // Save changes to localStorage helper
-  const saveListsToStorage = (updatedLists: TaskList[]) => {
-    try {
-      localStorage.setItem('drivedeck_task_lists', JSON.stringify(updatedLists));
-    } catch (error) {
-      console.error('Failed storing task lists:', error);
-    }
-  };
-
-  const saveTasksToStorage = (updatedTasks: Task[] | ((prev: Task[]) => Task[])) => {
-    setTasks(prev => {
-      const next = typeof updatedTasks === 'function' ? updatedTasks(prev) : updatedTasks;
-      try {
-        localStorage.setItem('drivedeck_tasks_data', JSON.stringify(next));
-      } catch (error) {
-        console.error('Failed storing tasks data:', error);
-      }
-      return next;
-    });
-  };
-
-  useEffect(() => {
-    if (activeListId) {
-      try {
-        localStorage.setItem('drivedeck_last_active_task_list', activeListId);
-      } catch {}
-    }
-  }, [activeListId]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('drivedeck_tasks_sound', String(soundEnabled));
-    } catch {}
-  }, [soundEnabled]);
-
-  // 4. Notification / Alert system (Audio synthesis)
+  // Sound synthesis chime
   const synthCompleteChime = () => {
     if (!soundEnabled) return;
     try {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       if (!AudioCtx) return;
       const ctx = new AudioCtx();
-      
+
       const masterVolume = ctx.createGain();
-      masterVolume.gain.setValueAtTime(0.12, ctx.currentTime);
+      masterVolume.gain.setValueAtTime(0.08, ctx.currentTime);
       masterVolume.connect(ctx.destination);
 
-      // Crystalline bell frequency tone #1 (base)
       const osc1 = ctx.createOscillator();
       const gain1 = ctx.createGain();
       osc1.type = 'sine';
-      osc1.frequency.setValueAtTime(1046.50, ctx.currentTime); // C6 Note
-      osc1.frequency.exponentialRampToValueAtTime(1318.51, ctx.currentTime + 0.12); // Sweep to E6
+      osc1.frequency.setValueAtTime(1046.50, ctx.currentTime); // C6
+      osc1.frequency.exponentialRampToValueAtTime(1318.51, ctx.currentTime + 0.18); // E6
       
-      gain1.gain.setValueAtTime(1.0, ctx.currentTime);
+      gain1.gain.setValueAtTime(0.8, ctx.currentTime);
       gain1.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.45);
       
       osc1.connect(gain1);
       gain1.connect(masterVolume);
 
-      // Higher harmonic bell tone #2 (overtone)
       const osc2 = ctx.createOscillator();
       const gain2 = ctx.createGain();
       osc2.type = 'sine';
@@ -515,42 +381,315 @@ export default function GoogleTasks({ showConfirm }: GoogleTasksProps = {}) {
     }
   };
 
-  const showToast = (message: string, type: 'success' | 'info' | 'star' = 'info') => {
-    const id = Math.random().toString(36).substr(2, 9);
-    setToasts(prev => [...prev, { id, message, type }]);
-    setTimeout(() => {
-      setToasts(prev => prev.filter(t => t.id !== id));
-    }, 3800);
+  // Helper to persist tasks to storage
+  const saveTasksToStorage = (updater: Task[] | ((prev: Task[]) => Task[])) => {
+    setTasks(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      try {
+        localStorage.setItem('drivedeck_tasks_data', JSON.stringify(next));
+      } catch (err) {
+        console.error('Error saving tasks to localStorage:', err);
+      }
+      return next;
+    });
   };
 
-  // 5. Actions: List Management
-  const handleCreateList = () => {
+  const saveListsToStorage = (updatedLists: TaskList[]) => {
+    try {
+      localStorage.setItem('drivedeck_task_lists', JSON.stringify(updatedLists));
+    } catch (error) {
+      console.error('Failed to store lists to localStorage:', error);
+    }
+  };
+
+  // 3. Initial Load from LocalStorage for instant render, then live Google Tasks API fetch
+  useEffect(() => {
+    // 3a. Read cached lists & tasks first
+    let cachedLists: TaskList[] = [];
+    let cachedTasks: Task[] = [];
+    try {
+      const storedLists = localStorage.getItem('drivedeck_task_lists');
+      if (storedLists) {
+        cachedLists = JSON.parse(storedLists);
+        setLists(cachedLists);
+      }
+      const storedTasks = localStorage.getItem('drivedeck_tasks_data');
+      if (storedTasks) {
+        cachedTasks = JSON.parse(storedTasks);
+        setTasks(cachedTasks);
+      }
+      const lastActiveListId = localStorage.getItem('drivedeck_last_active_task_list');
+      if (lastActiveListId && cachedLists.some(l => l.id === lastActiveListId)) {
+        setActiveListId(lastActiveListId);
+      } else if (cachedLists.length > 0) {
+        setActiveListId(cachedLists[0].id);
+      }
+    } catch (e) {
+      console.warn('Error reading cached tasks:', e);
+    }
+
+    // 3b. If no token, provide default offline seed if completely empty
+    if (!authToken) {
+      if (cachedLists.length === 0) {
+        const seedLists: TaskList[] = [
+          { id: 'list-default', name: '☑️ Meine Aufgaben', icon: '☑️', createdAt: Date.now() },
+          { id: 'list-work', name: '💼 Arbeit & Fokus', icon: '💼', createdAt: Date.now() - 10000 },
+          { id: 'list-private', name: '🏠 Privat', icon: '🏠', createdAt: Date.now() - 20000 }
+        ];
+        setLists(seedLists);
+        saveListsToStorage(seedLists);
+        setActiveListId('list-default');
+      }
+      setIsInitialLoading(false);
+      return;
+    }
+
+    // 3c. If token exists, fetch live lists from Google Tasks API
+    loadGoogleTasksData(authToken);
+  }, [authToken]);
+
+  // Main Google Tasks Fetch Function
+  const loadGoogleTasksData = async (token: string) => {
+    setSyncStatus('syncing');
+    setSyncError(null);
+    try {
+      const apiLists = await fetchGoogleTaskLists(token);
+      
+      if (!apiLists || apiLists.length === 0) {
+        // Create initial default list on Google Tasks if user has none
+        const defaultCreated = await createGoogleTaskList(token, '☑️ Meine Aufgaben');
+        apiLists.push(defaultCreated);
+      }
+
+      const mappedLists: TaskList[] = apiLists.map(mapApiTaskListToLocal);
+      setLists(mappedLists);
+      saveListsToStorage(mappedLists);
+
+      // Determine active list
+      let targetListId = activeListId;
+      const savedLastId = localStorage.getItem('drivedeck_last_active_task_list');
+      if (savedLastId && mappedLists.some(l => l.id === savedLastId)) {
+        targetListId = savedLastId;
+      } else if (!mappedLists.some(l => l.id === targetListId)) {
+        targetListId = mappedLists[0]?.id || '';
+      }
+      setActiveListId(targetListId);
+
+      // Fetch tasks for all lists in parallel
+      const allTasksPromises = mappedLists.map(async (l) => {
+        try {
+          const apiTasks = await fetchGoogleTasksInList(token, l.id, true, true);
+          return mapApiTasksToLocal(apiTasks, l.id);
+        } catch (err) {
+          console.warn(`Could not load tasks for list ${l.id}:`, err);
+          return [];
+        }
+      });
+
+      const taskArrays = await Promise.all(allTasksPromises);
+      const combinedTasks = taskArrays.flat();
+
+      setTasks(combinedTasks);
+      saveTasksToStorage(combinedTasks);
+      setSyncStatus('synced');
+    } catch (err: any) {
+      console.error('Google Tasks API error:', err);
+      setSyncStatus('error');
+      setSyncError(err?.message || 'Google Tasks konnte nicht geladen werden.');
+    } finally {
+      setIsInitialLoading(false);
+    }
+  };
+
+  // Manual refresh handler
+  const handleManualRefresh = () => {
+    if (authToken) {
+      loadGoogleTasksData(authToken);
+      showToast('Synchronisiere mit Google Tasks...', 'info');
+    } else {
+      showToast('Offline-Modus: Daten lokal gesichert.', 'info');
+    }
+  };
+
+  // Notification Reminder Clock (checks due tasks every 15s)
+  useEffect(() => {
+    const checkDueReminders = () => {
+      const now = new Date();
+      const dateStr = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+      const timeStr = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
+
+      tasks.forEach(task => {
+        if (task.completed || !task.dueDate || !task.dueTime) return;
+
+        if (task.dueDate === dateStr && task.dueTime === timeStr) {
+          if (notifiedTaskIds.includes(task.id)) return;
+
+          setNotifiedTaskIds(prev => {
+            const next = [...prev, task.id];
+            try {
+              localStorage.setItem('drivedeck_notified_tasks', JSON.stringify(next));
+            } catch {}
+            return next;
+          });
+
+          synthCompleteChime();
+
+          const newToast = {
+            id: 'reminder-' + Date.now() + '-' + task.id,
+            message: `⏰ Fällig: "${task.title}"`,
+            type: 'info' as const
+          };
+          setToasts(prev => [newToast, ...prev]);
+
+          if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+            try {
+              new Notification("Google Tasks Erinnerung! ⏰", {
+                body: `Die Aufgabe "${task.title}" ist jetzt fällig.${task.notes ? '\n\nNotizen: ' + task.notes : ''}`,
+                icon: '/favicon.ico'
+              });
+            } catch (err) {
+              console.error('Browser notice failure:', err);
+            }
+          }
+        }
+      });
+    };
+
+    checkDueReminders();
+    const clockInterval = setInterval(checkDueReminders, 15000);
+    return () => clearInterval(clockInterval);
+  }, [tasks, notifiedTaskIds, soundEnabled]);
+
+  // Request notification permission flow
+  const requestPushPermission = async () => {
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      alert("Browser-Push-Benachrichtigungen werden von diesem Browser nicht unterstützt.");
+      return;
+    }
+
+    try {
+      const permission = await Notification.requestPermission();
+      setPushPermission(permission);
+
+      if (permission === 'granted') {
+        showToast('🔔 Push-Benachrichtigungen erfolgreich aktiviert!', 'success');
+        try {
+          new Notification("Aktiviert! 🔔", {
+            body: "Du wirst ab jetzt pünktlich an fällige Google Tasks erinnert.",
+            icon: '/favicon.ico'
+          });
+        } catch {}
+        synthCompleteChime();
+      } else {
+        showToast('❌ Blockiert! Bitte erlaube Benachrichtigungen im Browser.', 'info');
+      }
+    } catch (error) {
+      console.error('Permission request failed:', error);
+    }
+  };
+
+  // Toggle sound chime setting
+  const toggleSound = () => {
+    const next = !soundEnabled;
+    setSoundEnabled(next);
+    try {
+      localStorage.setItem('drivedeck_tasks_sound', String(next));
+    } catch {}
+    if (next) synthCompleteChime();
+    showToast(next ? 'Signalton aktiviert 🔔' : 'Signalton stummgeschaltet 🔕', 'info');
+  };
+
+  // Format dates for display
+  const formatHumanDate = (dateStr?: string, timeStr?: string) => {
+    if (!dateStr) return '';
+    try {
+      const parts = dateStr.split('-');
+      if (parts.length !== 3) return dateStr;
+      const d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+      
+      const today = new Date();
+      today.setHours(0,0,0,0);
+      const target = new Date(d);
+      target.setHours(0,0,0,0);
+      const diffDays = Math.round((target.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+      
+      let dateLabel = '';
+      if (diffDays === 0) dateLabel = 'Heute';
+      else if (diffDays === 1) dateLabel = 'Morgen';
+      else if (diffDays === -1) dateLabel = 'Gestern';
+      else dateLabel = d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
+      
+      return timeStr ? `${dateLabel}, ${timeStr} Uhr` : dateLabel;
+    } catch {
+      return dateStr;
+    }
+  };
+
+  // 4. List Operations (Create, Update, Delete) with Google Tasks API
+  const handleCreateList = async () => {
     if (!newListName.trim()) return;
-    const newListId = 'list-' + Math.random().toString(36).substr(2, 9);
-    const newList: TaskList = {
-      id: newListId,
-      name: newListName.trim(),
+    const titleWithIcon = `${newListIcon} ${newListName.trim()}`.trim();
+    
+    // Optimistic local state
+    const tempId = 'list-' + Date.now();
+    const optimisticList: TaskList = {
+      id: tempId,
+      name: titleWithIcon,
       icon: newListIcon,
       createdAt: Date.now()
     };
-    const updated = [...lists, newList];
+    
+    const updated = [...lists, optimisticList];
     setLists(updated);
     saveListsToStorage(updated);
-    setActiveListId(newListId);
+    setActiveListId(tempId);
     setNewListName('');
     setNewListIcon('📋');
     setShowAddListForm(false);
-    showToast(`Neue Liste "${newList.name}" erstellt.`, 'success');
+    showToast(`Neue Liste "${newListName.trim()}" wird erstellt...`, 'info');
+
+    // Call Google Tasks API if token available
+    if (authToken) {
+      try {
+        setSyncStatus('syncing');
+        const apiCreated = await createGoogleTaskList(authToken, titleWithIcon);
+        // Replace temp list ID with Google ID
+        setLists(prev => prev.map(l => l.id === tempId ? mapApiTaskListToLocal(apiCreated) : l));
+        setActiveListId(apiCreated.id);
+        saveListsToStorage(lists.map(l => l.id === tempId ? mapApiTaskListToLocal(apiCreated) : l));
+        setSyncStatus('synced');
+        showToast(`Liste "${newListName.trim()}" in Google Tasks angelegt! ✅`, 'success');
+      } catch (err: any) {
+        console.error('Error creating Google Task list:', err);
+        setSyncStatus('error');
+        showToast('Fehler beim Erstellen auf Google Tasks.', 'info');
+      }
+    }
   };
 
-  const handleUpdateList = () => {
+  const handleUpdateList = async () => {
     if (!editingListId || !editingListName.trim()) return;
-    const updated = lists.map(l => l.id === editingListId ? { ...l, name: editingListName.trim(), icon: editingListIcon } : l);
+    const titleWithIcon = `${editingListIcon} ${editingListName.trim()}`.trim();
+    
+    const targetId = editingListId;
+    const updated = lists.map(l => l.id === targetId ? { ...l, name: titleWithIcon, icon: editingListIcon } : l);
     setLists(updated);
     saveListsToStorage(updated);
-    showToast('Liste erfolgreich aktualisiert.', 'info');
     setEditingListId(null);
     setEditingListName('');
+    showToast('Liste wird aktualisiert...', 'info');
+
+    if (authToken && !targetId.startsWith('list-default')) {
+      try {
+        setSyncStatus('syncing');
+        await updateGoogleTaskList(authToken, targetId, titleWithIcon);
+        setSyncStatus('synced');
+        showToast('Liste in Google Tasks aktualisiert! ✅', 'success');
+      } catch (err) {
+        console.error('Error updating Google Task list:', err);
+        setSyncStatus('error');
+      }
+    }
   };
 
   const handleDeleteList = (id: string, name: string) => {
@@ -559,44 +698,52 @@ export default function GoogleTasks({ showConfirm }: GoogleTasksProps = {}) {
       return;
     }
 
-    const performDelete = () => {
+    const performDelete = async () => {
       const remainingLists = lists.filter(l => l.id !== id);
       setLists(remainingLists);
       saveListsToStorage(remainingLists);
 
-      // Filter out all associated tasks
+      // Remove associated tasks locally
       saveTasksToStorage(prev => prev.filter(t => t.listId !== id));
 
-      // Choose active fallback
       if (activeListId === id) {
         setActiveListId(remainingLists[0].id);
       }
       showToast(`Liste "${name}" gelöscht.`, 'info');
+
+      if (authToken && !id.startsWith('list-default')) {
+        try {
+          setSyncStatus('syncing');
+          await deleteGoogleTaskList(authToken, id);
+          setSyncStatus('synced');
+        } catch (err) {
+          console.error('Error deleting Google Task list:', err);
+          setSyncStatus('error');
+        }
+      }
     };
 
     const msg = `Möchtest du die Liste "${name}" und alle darin enthaltenen Aufgaben wirklich unwiderruflich löschen?`;
     if (showConfirm) {
-      showConfirm(
-        'Liste löschen',
-        msg,
-        performDelete,
-        'Löschen',
-        'Abbrechen'
-      );
+      showConfirm('Liste löschen', msg, performDelete, 'Löschen', 'Abbrechen');
     } else if (window.confirm(msg)) {
       performDelete();
     }
   };
 
-  // 6. Actions: Task Management
-  const handleAddTask = (e?: React.FormEvent) => {
+  // 5. Task Operations (Add, Toggle, Delete, Save Details) with Google Tasks API
+  const handleAddTask = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!newTaskTitle.trim()) return;
 
+    const title = newTaskTitle.trim();
+    const tempId = 'task-' + Date.now() + '-' + Math.random().toString(36).substr(2, 6);
+    const notesPayload = serializeGoogleTaskNotes('', newTaskStarred, undefined, newTaskDueTime);
+
     const newTask: Task = {
-      id: 'task-' + Math.random().toString(36).substr(2, 9),
+      id: tempId,
       listId: activeListId,
-      title: newTaskTitle.trim(),
+      title,
       notes: '',
       completed: false,
       dueDate: newTaskDueDate || undefined,
@@ -607,36 +754,124 @@ export default function GoogleTasks({ showConfirm }: GoogleTasksProps = {}) {
       updatedAt: Date.now()
     };
 
+    // Optimistic local add
     saveTasksToStorage(prev => [newTask, ...prev]);
     showToast(`"${newTask.title}" hinzugefügt.`, newTask.starred ? 'star' : 'success');
-    
-    // Clear input
+
+    // Clear form
     setNewTaskTitle('');
     setNewTaskDueDate('');
     setNewTaskDueTime('');
     setNewTaskStarred(false);
+
+    // Call Google Tasks API
+    if (authToken && activeListId) {
+      try {
+        setSyncStatus('syncing');
+        const dueRfc = newTaskDueDate ? new Date(`${newTaskDueDate}T00:00:00.000Z`).toISOString() : undefined;
+        const apiTask = await insertGoogleTask(authToken, activeListId, {
+          title,
+          notes: notesPayload || undefined,
+          due: dueRfc,
+          status: 'needsAction'
+        });
+
+        // Replace optimistic task with API task
+        saveTasksToStorage(prev => prev.map(t => t.id === tempId ? {
+          ...t,
+          id: apiTask.id,
+          updatedAt: apiTask.updated ? new Date(apiTask.updated).getTime() : Date.now()
+        } : t));
+
+        setSyncStatus('synced');
+      } catch (err) {
+        console.error('Error creating Google Task:', err);
+        setSyncStatus('error');
+      }
+    }
   };
 
+  // Toggle task completion
+  const handleToggleTaskCompleted = async (id: string, currentStatus: boolean) => {
+    const completed = !currentStatus;
+    if (completed) synthCompleteChime();
+
+    // Find current task
+    const taskToToggle = tasks.find(t => t.id === id);
+    if (!taskToToggle) return;
+
+    // Recurrence handling
+    let toastMsg = completed ? 'Aufgabe als erledigt markiert! 👍' : 'Aufgabe wieder geöffnet.';
+    
+    saveTasksToStorage(prev => {
+      if (completed && taskToToggle.recurrence) {
+        const nextDate = getNextOccurrence(taskToToggle.dueDate || '', taskToToggle.recurrence);
+        
+        const completedClone: Task = {
+          ...taskToToggle,
+          id: `${taskToToggle.id}-done-${Date.now()}`,
+          completed: true,
+          completedAt: Date.now(),
+          updatedAt: Date.now()
+        };
+
+        const advancedOriginal: Task = {
+          ...taskToToggle,
+          dueDate: nextDate,
+          completed: false,
+          completedAt: undefined,
+          updatedAt: Date.now()
+        };
+
+        toastMsg = `Termin erledigt! Nächste Fälligkeit automatisch am ${formatHumanDate(nextDate, taskToToggle.dueTime)} geplant. 🔄`;
+        return prev.map(t => t.id === id ? advancedOriginal : t).concat(completedClone);
+      }
+
+      return prev.map(t => {
+        if (t.id === id) {
+          return {
+            ...t,
+            completed,
+            completedAt: completed ? Date.now() : undefined,
+            updatedAt: Date.now()
+          };
+        }
+        return t;
+      });
+    });
+
+    showToast(toastMsg, 'success');
+
+    // Sync with Google Tasks API
+    if (authToken && !id.includes('-done-')) {
+      try {
+        setSyncStatus('syncing');
+        await updateGoogleTask(authToken, taskToToggle.listId, id, {
+          status: completed ? 'completed' : 'needsAction',
+          completed: completed ? new Date().toISOString() : null
+        });
+        setSyncStatus('synced');
+      } catch (err) {
+        console.error('Error updating task completion in Google Tasks:', err);
+        setSyncStatus('error');
+      }
+    }
+  };
+
+  // Recurrence computation helper
   const getNextOccurrence = (dateStr: string, recurrence: 'daily' | 'weekly' | 'monthly' | 'yearly'): string => {
     if (!dateStr) {
-      const now = new Date();
-      dateStr = now.toISOString().split('T')[0];
+      dateStr = new Date().toISOString().split('T')[0];
     }
     const d = new Date(dateStr);
     if (isNaN(d.getTime())) {
-      const now = new Date();
-      return now.toISOString().split('T')[0];
+      return new Date().toISOString().split('T')[0];
     }
     
-    if (recurrence === 'daily') {
-      d.setDate(d.getDate() + 1);
-    } else if (recurrence === 'weekly') {
-      d.setDate(d.getDate() + 7);
-    } else if (recurrence === 'monthly') {
-      d.setMonth(d.getMonth() + 1);
-    } else if (recurrence === 'yearly') {
-      d.setFullYear(d.getFullYear() + 1);
-    }
+    if (recurrence === 'daily') d.setDate(d.getDate() + 1);
+    else if (recurrence === 'weekly') d.setDate(d.getDate() + 7);
+    else if (recurrence === 'monthly') d.setMonth(d.getMonth() + 1);
+    else if (recurrence === 'yearly') d.setFullYear(d.getFullYear() + 1);
     
     const yyyy = d.getFullYear();
     const mm = String(d.getMonth() + 1).padStart(2, '0');
@@ -678,11 +913,7 @@ export default function GoogleTasks({ showConfirm }: GoogleTasksProps = {}) {
           recurrence: task.recurrence || 'daily',
           updatedAt: Date.now()
         };
-        if (isClone) {
-          return [revived, ...prev];
-        } else {
-          return prev.map(t => t.id === task.id ? revived : t);
-        }
+        return isClone ? [revived, ...prev] : prev.map(t => t.id === task.id ? revived : t);
       }
     });
 
@@ -690,98 +921,93 @@ export default function GoogleTasks({ showConfirm }: GoogleTasksProps = {}) {
     showToast(`"${task.title}" auf nächsten Termin (${formatHumanDate(nextDate, task.dueTime)}) gesetzt! 🔄`, 'success');
   };
 
-  const handleToggleTaskCompleted = (id: string, currentStatus: boolean) => {
-    let playedChime = false;
-    let toastMsg = 'Aufgabe als erledigt markiert! 👍';
+  // Toggle star priority
+  const handleToggleTaskStar = async (id: string) => {
+    const task = tasks.find(t => t.id === id);
+    if (!task) return;
+    const nowStarred = !task.starred;
 
-    saveTasksToStorage(prev => {
-      const taskToToggle = prev.find(t => t.id === id);
-      if (!taskToToggle) return prev;
+    saveTasksToStorage(prev => prev.map(t => t.id === id ? { ...t, starred: nowStarred, updatedAt: Date.now() } : t));
+    showToast(nowStarred ? 'Zur Merkliste hinzugefügt ⭐' : 'Stern entfernt', 'star');
 
-      const completed = !currentStatus;
-      if (completed && !playedChime) {
-        synthCompleteChime();
-        playedChime = true;
+    if (authToken && !id.includes('-done-')) {
+      try {
+        const notesPayload = serializeGoogleTaskNotes(task.notes, nowStarred, task.recurrence, task.dueTime);
+        await updateGoogleTask(authToken, task.listId, id, { notes: notesPayload });
+      } catch (err) {
+        console.error('Error updating task star status:', err);
       }
-
-      if (completed && taskToToggle.recurrence) {
-        const nextDate = getNextOccurrence(taskToToggle.dueDate || '', taskToToggle.recurrence);
-        
-        const completedClone: Task = {
-          ...taskToToggle,
-          id: `${taskToToggle.id}-done-${Date.now()}`,
-          completed: true,
-          completedAt: Date.now(),
-          updatedAt: Date.now()
-        };
-
-        const advancedOriginal: Task = {
-          ...taskToToggle,
-          dueDate: nextDate,
-          completed: false,
-          completedAt: undefined,
-          updatedAt: Date.now()
-        };
-
-        toastMsg = `Termin erledigt! Nächste Fälligkeit automatisch am ${formatHumanDate(nextDate, taskToToggle.dueTime)} geplant. 🔄`;
-        
-        return prev.map(t => t.id === id ? advancedOriginal : t).concat(completedClone);
-      }
-
-      return prev.map(t => {
-        if (t.id === id) {
-          return { 
-            ...t, 
-            completed, 
-            completedAt: completed ? Date.now() : undefined,
-            updatedAt: Date.now()
-          };
-        }
-        return t;
-      });
-    });
-
-    if (!currentStatus) {
-      showToast(toastMsg, 'success');
     }
   };
 
-  const handleToggleTaskStar = (id: string) => {
-    let nowStarred = false;
-    saveTasksToStorage(prev => prev.map(t => {
-      if (t.id === id) {
-        nowStarred = !t.starred;
-        return { ...t, starred: nowStarred, updatedAt: Date.now() };
-      }
-      return t;
-    }));
-    showToast(nowStarred ? 'Zur Merkliste hinzugefügt ⭐' : 'Stern entfernt', 'star');
-  };
-
+  // Delete task
   const handleDeleteTask = (id: string, title: string) => {
-    const performDelete = () => {
+    const performDelete = async () => {
+      const taskToDelete = tasks.find(t => t.id === id);
       saveTasksToStorage(prev => prev.filter(t => t.id !== id));
       if (selectedTaskId === id) {
         setSelectedTaskId(null);
       }
       showToast('Aufgabe endgültig gelöscht.', 'info');
+
+      if (authToken && taskToDelete && !id.includes('-done-') && !id.startsWith('task-')) {
+        try {
+          setSyncStatus('syncing');
+          await deleteGoogleTask(authToken, taskToDelete.listId, id);
+          setSyncStatus('synced');
+        } catch (err) {
+          console.error('Error deleting task on Google Tasks:', err);
+          setSyncStatus('error');
+        }
+      }
     };
 
     const msg = `"${title}" wirklich endgültig löschen?`;
     if (showConfirm) {
-      showConfirm(
-        'Aufgabe löschen',
-        msg,
-        performDelete,
-        'Löschen',
-        'Abbrechen'
-      );
+      showConfirm('Aufgabe löschen', msg, performDelete, 'Löschen', 'Abbrechen');
     } else if (window.confirm(msg)) {
       performDelete();
     }
   };
 
-  // 7. Expand/Collapse subtask trees
+  // Clear all completed tasks in current list
+  const handleClearCompleted = async () => {
+    const completedInList = tasks.filter(t => t.listId === activeListId && t.completed);
+    if (completedInList.length === 0) {
+      showToast('Keine erledigten Aufgaben zum Bereinigen vorhanden.', 'info');
+      return;
+    }
+
+    const performClear = async () => {
+      saveTasksToStorage(prev => prev.filter(t => !(t.listId === activeListId && t.completed)));
+      showToast(`${completedInList.length} erledigte Aufgaben bereinigt! 🧹`, 'info');
+
+      if (authToken && !activeListId.startsWith('list-default')) {
+        try {
+          setSyncStatus('syncing');
+          await clearCompletedGoogleTasks(authToken, activeListId);
+          setSyncStatus('synced');
+        } catch (err) {
+          console.error('Error clearing completed tasks on Google Tasks:', err);
+          setSyncStatus('error');
+        }
+      }
+    };
+
+    if (showConfirm) {
+      showConfirm(
+        'Erledigte Aufgaben bereinigen',
+        `Möchtest du alle ${completedInList.length} erledigten Aufgaben in dieser Liste endgültig aus Google Tasks entfernen?`,
+        performClear,
+        'Bereinigen',
+        'Abbrechen'
+      );
+    } else {
+      performClear();
+    }
+  };
+
+  // Expand subtasks
   const toggleSubtaskExpand = (taskId: string) => {
     setExpandedSubtasks(prev => ({
       ...prev,
@@ -789,7 +1015,7 @@ export default function GoogleTasks({ showConfirm }: GoogleTasksProps = {}) {
     }));
   };
 
-  // 8. Edit Details Panel (Slide Out)
+  // Select task for detail editor
   const handleSelectTaskForDetails = (task: Task) => {
     setSelectedTaskId(task.id);
     setDetailTitle(task.title);
@@ -800,33 +1026,62 @@ export default function GoogleTasks({ showConfirm }: GoogleTasksProps = {}) {
     setDetailRecurrence(task.recurrence || 'none');
   };
 
-  const handleSaveTaskDetails = () => {
+  // Save task details
+  const handleSaveTaskDetails = async () => {
     if (!selectedTaskId) return;
+    const targetTask = tasks.find(t => t.id === selectedTaskId);
+    if (!targetTask) return;
+
+    const newTitle = detailTitle.trim() || targetTask.title;
+    const recurrenceVal = detailRecurrence !== 'none' ? detailRecurrence : undefined;
+
     saveTasksToStorage(prev => prev.map(t => {
       if (t.id === selectedTaskId) {
         return {
           ...t,
-          title: detailTitle.trim() || t.title,
+          title: newTitle,
           notes: detailNotes,
           dueDate: detailDueDate || undefined,
           dueTime: detailDueTime || undefined,
           starred: detailStarred,
-          recurrence: detailRecurrence !== 'none' ? detailRecurrence : undefined,
+          recurrence: recurrenceVal,
           updatedAt: Date.now()
         };
       }
       return t;
     }));
     showToast('Änderungen gespeichert.', 'info');
+
+    if (authToken && !selectedTaskId.includes('-done-') && !selectedTaskId.startsWith('task-')) {
+      try {
+        setSyncStatus('syncing');
+        const notesPayload = serializeGoogleTaskNotes(detailNotes, detailStarred, recurrenceVal, detailDueTime || undefined);
+        const dueRfc = detailDueDate ? new Date(`${detailDueDate}T00:00:00.000Z`).toISOString() : null;
+
+        await updateGoogleTask(authToken, targetTask.listId, selectedTaskId, {
+          title: newTitle,
+          notes: notesPayload,
+          due: dueRfc
+        });
+        setSyncStatus('synced');
+      } catch (err) {
+        console.error('Error updating task details on Google Tasks:', err);
+        setSyncStatus('error');
+      }
+    }
   };
 
-  // Subtask additions inside details card
-  const handleAddSubtask = (e?: React.FormEvent) => {
+  // Subtask Management (Google Tasks parent/child hierarchy)
+  const handleAddSubtask = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!newSubtaskTitle.trim() || !selectedTaskId) return;
 
+    const parentTask = tasks.find(t => t.id === selectedTaskId);
+    if (!parentTask) return;
+
+    const tempSubId = 'sub-' + Date.now() + '-' + Math.random().toString(36).substr(2, 6);
     const newSub: SubTask = {
-      id: 'sub-' + Math.random().toString(36).substr(2, 9),
+      id: tempSubId,
       title: newSubtaskTitle.trim(),
       completed: false,
       createdAt: Date.now()
@@ -845,30 +1100,67 @@ export default function GoogleTasks({ showConfirm }: GoogleTasksProps = {}) {
 
     setNewSubtaskTitle('');
     showToast('Teilaufgabe hinzugefügt.', 'success');
+
+    // Create subtask on Google Tasks via parent param
+    if (authToken && !selectedTaskId.startsWith('task-') && !selectedTaskId.includes('-done-')) {
+      try {
+        const apiSub = await insertGoogleTask(authToken, parentTask.listId, {
+          title: newSub.title,
+          parent: selectedTaskId,
+          status: 'needsAction'
+        });
+
+        // Update subtask ID with Google ID
+        saveTasksToStorage(prev => prev.map(t => {
+          if (t.id === selectedTaskId) {
+            return {
+              ...t,
+              subtasks: t.subtasks.map(s => s.id === tempSubId ? { ...s, id: apiSub.id } : s)
+            };
+          }
+          return t;
+        }));
+      } catch (err) {
+        console.error('Error creating subtask on Google Tasks:', err);
+      }
+    }
   };
 
-  const handleToggleSubtask = (taskId: string, subId: string) => {
+  const handleToggleSubtask = async (taskId: string, subId: string) => {
+    const parent = tasks.find(t => t.id === taskId);
+    if (!parent) return;
+
+    let nextCompleted = false;
     saveTasksToStorage(prev => prev.map(t => {
       if (t.id === taskId) {
         const updatedSubs = t.subtasks.map(sub => {
           if (sub.id === subId) {
-            const completed = !sub.completed;
-            if (completed) synthCompleteChime();
-            return { ...sub, completed };
+            nextCompleted = !sub.completed;
+            if (nextCompleted) synthCompleteChime();
+            return { ...sub, completed: nextCompleted };
           }
           return sub;
         });
-        return {
-          ...t,
-          subtasks: updatedSubs,
-          updatedAt: Date.now()
-        };
+        return { ...t, subtasks: updatedSubs, updatedAt: Date.now() };
       }
       return t;
     }));
+
+    if (authToken && !subId.startsWith('sub-')) {
+      try {
+        await updateGoogleTask(authToken, parent.listId, subId, {
+          status: nextCompleted ? 'completed' : 'needsAction'
+        });
+      } catch (err) {
+        console.error('Error updating subtask on Google Tasks:', err);
+      }
+    }
   };
 
-  const handleDeleteSubtask = (taskId: string, subId: string) => {
+  const handleDeleteSubtask = async (taskId: string, subId: string) => {
+    const parent = tasks.find(t => t.id === taskId);
+    if (!parent) return;
+
     saveTasksToStorage(prev => prev.map(t => {
       if (t.id === taskId) {
         return {
@@ -879,281 +1171,264 @@ export default function GoogleTasks({ showConfirm }: GoogleTasksProps = {}) {
       }
       return t;
     }));
-    showToast('Teilaufgabe gelöscht.', 'info');
-  };
 
-  // 9. Sorting & Filtering
-  const activeList = lists.find(l => l.id === activeListId);
-  
-  // Format dates elegantly for humans
-  const formatHumanDate = (dateStr?: string, timeStr?: string) => {
-    if (!dateStr) return '';
-    try {
-      const d = new Date(dateStr);
-      const today = new Date();
-      const tomorrow = new Date();
-      tomorrow.setDate(today.getDate() + 1);
-
-      let formattedDate = '';
-      const dCleanStr = d.toDateString();
-      if (dCleanStr === today.toDateString()) {
-        formattedDate = '📅 Heute';
-      } else if (dCleanStr === tomorrow.toDateString()) {
-        formattedDate = '📅 Morgen';
-      } else {
-        formattedDate = '📅 ' + d.toLocaleDateString('de-DE', { day: 'numeric', month: 'short', year: 'numeric' });
+    if (authToken && !subId.startsWith('sub-')) {
+      try {
+        await deleteGoogleTask(authToken, parent.listId, subId);
+      } catch (err) {
+        console.error('Error deleting subtask on Google Tasks:', err);
       }
-
-      if (timeStr) {
-        formattedDate += ` um ${timeStr} Uhr`;
-      }
-      return formattedDate;
-    } catch {
-      return dateStr + (timeStr ? ` um ${timeStr} Uhr` : '');
     }
   };
 
-  // Tasks in currently loaded list
-  const filteredListTasks = tasks.filter(t => {
-    const matchesList = t.listId === activeListId;
-    const matchesSearch = t.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
-                          (t.notes || '').toLowerCase().includes(searchQuery.toLowerCase());
-    return matchesList && matchesSearch;
-  });
+  // Active list item
+  const activeList = useMemo(() => {
+    return lists.find(l => l.id === activeListId) || lists[0];
+  }, [lists, activeListId]);
 
-  // Split into active & completed
-  const activeTasks = filteredListTasks.filter(t => !t.completed);
-  const completedTasks = filteredListTasks.filter(t => t.completed);
+  // Tasks in active list
+  const activeTasks = useMemo(() => {
+    if (!activeList) return [];
+    return tasks.filter(t => t.listId === activeList.id && !t.completed);
+  }, [tasks, activeList]);
 
-  // Apply sorting models on active tasks
-  const sortedActiveTasks = [...activeTasks].sort((a, b) => {
-    if (sortBy === 'date') {
-      if (!a.dueDate) return 1;
-      if (!b.dueDate) return -1;
-      const valA = a.dueDate + (a.dueTime ? `T${a.dueTime}` : 'T00:00');
-      const valB = b.dueDate + (b.dueTime ? `T${b.dueTime}` : 'T00:00');
-      return valA.localeCompare(valB);
-    }
+  const completedTasks = useMemo(() => {
+    if (!activeList) return [];
+    return tasks.filter(t => t.listId === activeList.id && t.completed);
+  }, [tasks, activeList]);
+
+  // Filter tasks based on search
+  const filteredActiveTasks = useMemo(() => {
+    if (!searchQuery.trim()) return activeTasks;
+    const q = searchQuery.toLowerCase();
+    return activeTasks.filter(t => 
+      t.title.toLowerCase().includes(q) || 
+      (t.notes && t.notes.toLowerCase().includes(q))
+    );
+  }, [activeTasks, searchQuery]);
+
+  // Sort tasks
+  const sortedActiveTasks = useMemo(() => {
+    const arr = [...filteredActiveTasks];
     if (sortBy === 'starred') {
-      if (a.starred && !b.starred) return -1;
-      if (!a.starred && b.starred) return 1;
+      return arr.sort((a, b) => {
+        if (a.starred === b.starred) return b.createdAt - a.createdAt;
+        return a.starred ? -1 : 1;
+      });
     }
-    // Default manual created-at sorter (newest first)
-    return b.createdAt - a.createdAt;
-  });
+    if (sortBy === 'date') {
+      return arr.sort((a, b) => {
+        if (!a.dueDate) return 1;
+        if (!b.dueDate) return -1;
+        return a.dueDate.localeCompare(b.dueDate);
+      });
+    }
+    // Manual / newest first
+    return arr.sort((a, b) => b.createdAt - a.createdAt);
+  }, [filteredActiveTasks, sortBy]);
 
-  const sortedCompletedTasks = [...completedTasks].sort((a, b) => {
-    return (b.completedAt || 0) - (a.completedAt || 0);
-  });
+  const sortedCompletedTasks = useMemo(() => {
+    return [...completedTasks].sort((a, b) => (b.completedAt || b.createdAt) - (a.completedAt || a.createdAt));
+  }, [completedTasks]);
 
-  // Currently viewing task details object
-  const activeDetailTask = tasks.find(t => t.id === selectedTaskId);
+  const activeDetailTask = useMemo(() => {
+    return tasks.find(t => t.id === selectedTaskId);
+  }, [tasks, selectedTaskId]);
 
   return (
-    <div className="flex-1 flex overflow-hidden min-h-0 bg-slate-50 font-sans select-none relative [content-visibility:auto]">
+    <div className="flex-1 flex h-full overflow-hidden bg-white">
       
-      {/* List Sidebar Panel */}
-      <div className="w-56 shrink-0 border-r border-slate-200 bg-white flex flex-col justify-between hidden md:flex h-full select-none">
-        
-        {/* Sidebar Header & Identity */}
-        <div className="p-4 border-b border-secondary-100 flex items-center justify-between">
-          <div className="flex items-center space-x-2 text-sky-600 font-bold">
-            <ListTodo className="w-5 h-5" />
-            <span className="text-sm tracking-tight text-slate-800">Deine Aufgaben</span>
-          </div>
-          
-          <div className="flex items-center gap-1">
-            <button 
-              onClick={requestPushPermission}
-              className={`p-1 hover:bg-slate-100 rounded transition-colors cursor-pointer ${pushPermission === 'granted' ? 'text-amber-550 bg-amber-50 hover:bg-amber-100/60 animate-bounce duration-1000' : 'text-slate-300 hover:text-slate-500'}`}
-              title={
-                pushPermission === 'granted' 
-                  ? 'Push-Meldungen sind aktiv! 🔔' 
-                  : pushPermission === 'denied'
-                    ? 'Push-Meldungen sind im Browser blockiert ❌'
-                    : 'Push-Meldungen aktivieren 🔔'
-              }
-            >
-              <Bell className="w-4 h-4" />
-            </button>
-            <button 
-              onClick={() => setSoundEnabled(!soundEnabled)}
-              className="p-1 hover:bg-slate-100 rounded text-slate-400 hover:text-slate-600 transition-colors cursor-pointer"
-              title={soundEnabled ? 'Erlebnissounds stummschalten' : 'Sounds einschalten'}
-            >
-              {soundEnabled ? <Volume2 className="w-4 h-4 text-sky-500" /> : <VolumeX className="w-4 h-4 text-slate-300" />}
-            </button>
-          </div>
-        </div>
-
-        {/* Task Lists Scroll View */}
-        <div className="flex-1 overflow-y-auto py-2.5 px-2 space-y-0.5">
-          <h4 className="px-2 pb-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-            Eigene Listen
-          </h4>
-
-          {lists.map(list => {
-            const isSelected = list.id === activeListId;
-            const isEditing = editingListId === list.id;
-            const taskCount = tasks.filter(t => t.listId === list.id && !t.completed).length;
-
-            return (
-              <div
-                key={list.id}
-                onClick={() => {
-                  if (!isEditing) {
-                    setActiveListId(list.id);
-                    setSelectedTaskId(null); // Clear active edit drawer
-                  }
-                }}
-                className={`group flex items-center justify-between px-2.5 py-2 text-xs rounded-lg cursor-pointer border transition-all duration-150 ${
-                  isSelected
-                    ? 'bg-sky-50 border-sky-100 text-sky-700 font-semibold'
-                    : 'text-slate-600 hover:bg-slate-50 border-transparent'
+      {/* 1. Left Sidebar: Google Task Lists */}
+      <div className="w-64 shrink-0 border-r border-slate-200 bg-slate-50/50 flex flex-col justify-between h-full select-none">
+        <div className="p-3 overflow-y-auto flex-1">
+          <div className="flex items-center justify-between mb-3 px-1">
+            <div className="flex items-center space-x-2">
+              <span className="text-base">☑️</span>
+              <span className="text-xs font-extrabold text-slate-800 tracking-tight">Google Tasks</span>
+            </div>
+            
+            <div className="flex items-center space-x-1">
+              {/* Push notification bell */}
+              <button
+                onClick={requestPushPermission}
+                className={`p-1 rounded-md transition-colors cursor-pointer ${
+                  pushPermission === 'granted' 
+                    ? 'text-sky-600 hover:bg-sky-100/50' 
+                    : 'text-slate-400 hover:text-slate-600 hover:bg-slate-200/50'
                 }`}
+                title={pushPermission === 'granted' ? 'Push-Erinnerungen aktiv' : 'Push-Benachrichtigungen aktivieren'}
               >
-                {isEditing ? (
-                  <div className="flex flex-col gap-1.5 w-full bg-slate-50/80 p-1.5 rounded-lg border border-sky-200" onClick={e => e.stopPropagation()}>
-                    <div className="flex items-center gap-1.5 w-full">
-                      <span className="text-xs select-none shrink-0 bg-white p-1 rounded border border-slate-150 w-6 h-6 flex items-center justify-center">
-                        {editingListIcon}
-                      </span>
-                      <input
-                        type="text"
-                        value={editingListName}
-                        onChange={e => setEditingListName(e.target.value)}
-                        onKeyDown={e => e.key === 'Enter' && handleUpdateList()}
-                        className="w-full text-[11px] py-1 px-1.5 bg-white border border-slate-200 rounded focus:outline-none focus:ring-1 focus:ring-sky-400 font-medium text-slate-700"
-                        autoFocus
-                      />
-                    </div>
-                    
-                    {/* Presets Grid */}
-                    <div className="space-y-1">
-                      <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wider select-none">Symbol ändern:</span>
-                      <div className="grid grid-cols-6 gap-2 p-1.5 bg-white border border-slate-150 rounded-md max-h-[160px] overflow-y-auto w-full custom-scrollbar">
-                        {PRESET_EMOJIS.map(emoji => (
-                          <button
-                            key={emoji}
-                            type="button"
-                            onClick={() => setEditingListIcon(emoji)}
-                            className={`text-lg w-8 h-8 flex items-center justify-center hover:bg-slate-100 rounded-lg transition-all cursor-pointer ${editingListIcon === emoji ? 'bg-sky-100 shadow-3xs scale-110 border border-sky-200' : 'border border-transparent'}`}
-                          >
-                            {emoji}
-                          </button>
-                        ))}
+                <Bell className={`w-3.5 h-3.5 ${pushPermission === 'granted' ? 'fill-sky-500' : ''}`} />
+              </button>
+
+              {/* Sound chime toggle */}
+              <button
+                onClick={toggleSound}
+                className={`p-1 rounded-md transition-colors cursor-pointer ${
+                  soundEnabled ? 'text-sky-600 hover:bg-sky-100/50' : 'text-slate-400 hover:bg-slate-200/50'
+                }`}
+                title={soundEnabled ? 'Signalton aktiv' : 'Signalton stumm'}
+              >
+                {soundEnabled ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
+              </button>
+
+              {/* Manual refresh button */}
+              <button
+                onClick={handleManualRefresh}
+                disabled={syncStatus === 'syncing'}
+                className="p-1 rounded-md text-slate-400 hover:text-sky-600 hover:bg-slate-200/50 transition-colors cursor-pointer"
+                title="Google Tasks jetzt synchronisieren"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${syncStatus === 'syncing' ? 'animate-spin text-sky-600' : ''}`} />
+              </button>
+            </div>
+          </div>
+
+          {/* Task Lists Navigation items */}
+          <div className="space-y-1">
+            {lists.map(list => {
+              const details = getListDetails(list);
+              const isActive = list.id === activeListId;
+              const count = tasks.filter(t => t.listId === list.id && !t.completed).length;
+
+              return (
+                <div key={list.id} className="relative group/list">
+                  {editingListId === list.id ? (
+                    <div className="p-2 bg-white rounded-lg border border-sky-300 shadow-xs space-y-2">
+                      <div className="flex items-center space-x-1.5">
+                        <select
+                          value={editingListIcon}
+                          onChange={e => setEditingListIcon(e.target.value)}
+                          className="text-base bg-slate-100 rounded px-1 py-0.5 border border-slate-200 cursor-pointer"
+                        >
+                          {PRESET_EMOJIS.map(e => <option key={e} value={e}>{e}</option>)}
+                        </select>
+                        <input
+                          type="text"
+                          value={editingListName}
+                          onChange={e => setEditingListName(e.target.value)}
+                          className="flex-1 text-xs px-2 py-1 bg-slate-50 border border-slate-200 rounded font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                          placeholder="Listenname..."
+                          autoFocus
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') handleUpdateList();
+                            if (e.key === 'Escape') setEditingListId(null);
+                          }}
+                        />
+                      </div>
+                      <div className="flex justify-end space-x-1.5">
+                        <button
+                          onClick={() => setEditingListId(null)}
+                          className="px-2 py-0.5 text-[10px] text-slate-500 hover:bg-slate-100 rounded cursor-pointer"
+                        >
+                          Abbrechen
+                        </button>
+                        <button
+                          onClick={handleUpdateList}
+                          className="px-2.5 py-0.5 text-[10px] bg-sky-600 hover:bg-sky-500 text-white rounded font-bold cursor-pointer"
+                        >
+                          Speichern
+                        </button>
                       </div>
                     </div>
+                  ) : (
+                    <div
+                      onClick={() => {
+                        setActiveListId(list.id);
+                        try {
+                          localStorage.setItem('drivedeck_last_active_task_list', list.id);
+                        } catch {}
+                      }}
+                      className={`w-full flex items-center justify-between px-2.5 py-2 rounded-lg text-xs font-semibold cursor-pointer transition-all ${
+                        isActive
+                          ? 'bg-sky-500/10 text-sky-800 font-bold border border-sky-400/20 shadow-3xs'
+                          : 'text-slate-650 hover:bg-slate-200/50 hover:text-slate-900 border border-transparent'
+                      }`}
+                    >
+                      <div className="flex items-center space-x-2 min-w-0 flex-1">
+                        <span className="text-sm shrink-0">{details.icon}</span>
+                        <span className="truncate">{details.name}</span>
+                      </div>
 
-                    <div className="flex justify-end gap-1 border-t border-slate-150 pt-1">
-                      <button
-                        onClick={() => setEditingListId(null)}
-                        className="px-2 py-0.5 text-[9px] font-semibold text-slate-500 hover:text-slate-750 bg-slate-100 rounded cursor-pointer"
-                      >
-                        Abbrechen
-                      </button>
-                      <button
-                        onClick={handleUpdateList}
-                        className="px-2.5 py-0.5 text-[9px] font-bold text-white bg-sky-600 hover:bg-sky-500 rounded cursor-pointer shadow-3xs"
-                      >
-                        Speichern
-                      </button>
+                      <div className="flex items-center space-x-1 shrink-0 ml-1.5">
+                        {count > 0 && (
+                          <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
+                            isActive ? 'bg-sky-200 text-sky-900' : 'bg-slate-200 text-slate-600'
+                          }`}>
+                            {count}
+                          </span>
+                        )}
+
+                        {/* List actions on hover */}
+                        <div className="opacity-0 group-hover/list:opacity-100 flex items-center transition-opacity ml-1">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEditingListId(list.id);
+                              setEditingListName(details.name);
+                              setEditingListIcon(details.icon);
+                            }}
+                            className="p-0.5 hover:text-sky-600 text-slate-400 rounded"
+                            title="Liste umbenennen"
+                          >
+                            <Edit3 className="w-3 h-3" />
+                          </button>
+                          {lists.length > 1 && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteList(list.id, details.name);
+                              }}
+                              className="p-0.5 hover:text-red-600 text-slate-400 rounded"
+                              title="Liste löschen"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                ) : (
-                  <div className="flex items-center space-x-2 min-w-0 flex-1">
-                    <span className="mr-0.5 shrink-0 text-xs select-none w-5 h-5 flex items-center justify-center bg-white/60 group-hover:bg-white rounded border border-transparent group-hover:border-slate-100 shadow-3xs transition-all">
-                      {getListDetails(list).icon}
-                    </span>
-                    <span className="truncate">{getListDetails(list).name}</span>
-                  </div>
-                )}
+                  )}
+                </div>
+              );
+            })}
+          </div>
 
-                {/* Counts and menu button */}
-                {!isEditing && (
-                  <div className="flex items-center space-x-1.5 shrink-0 opacity-100">
-                    {taskCount > 0 && (
-                      <span className="inline-flex items-center justify-center text-[9px] font-extrabold px-1.5 py-0.5 rounded-full bg-slate-150 text-slate-500 group-hover:bg-sky-100 group-hover:text-sky-700 transition-colors">
-                        {taskCount}
-                      </span>
-                    )}
-
-                    {/* Controls */}
-                    <div className="hidden group-hover:flex items-center gap-1">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setEditingListId(list.id);
-                          setEditingListName(getListDetails(list).name);
-                          setEditingListIcon(getListDetails(list).icon);
-                        }}
-                        className="p-0.5 hover:text-sky-600 hover:bg-white rounded transition-colors"
-                        title="Liste umbenennen & anpassen"
-                      >
-                        <Edit3 className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDeleteList(list.id, list.name);
-                        }}
-                        className="p-0.5 text-slate-400 hover:text-red-500 hover:bg-white rounded transition-colors"
-                        title="Liste löschen"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-
-          {/* Add List Controls */}
+          {/* Add New List Button & Form */}
           {showAddListForm ? (
-            <div className="p-2 border border-slate-150 bg-white shadow-2xs rounded-lg mt-2 space-y-2 animate-in slide-in-from-top-2 duration-150">
-              <div className="flex items-center gap-1.5">
-                <span className="text-xs select-none shrink-0 bg-slate-50 p-1 rounded border border-slate-150 w-6 h-6 flex items-center justify-center">
-                  {newListIcon}
-                </span>
+            <div className="mt-2 p-2.5 bg-white border border-slate-200 rounded-lg shadow-xs space-y-2 animate-in fade-in duration-150">
+              <div className="flex items-center space-x-1.5">
+                <select
+                  value={newListIcon}
+                  onChange={e => setNewListIcon(e.target.value)}
+                  className="text-base bg-slate-50 border border-slate-200 rounded px-1 py-0.5 cursor-pointer"
+                >
+                  {PRESET_EMOJIS.map(e => <option key={e} value={e}>{e}</option>)}
+                </select>
                 <input
                   type="text"
-                  placeholder="Name der Liste..."
+                  placeholder="Listenname..."
                   value={newListName}
                   onChange={e => setNewListName(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && handleCreateList()}
-                  className="w-full text-xs bg-slate-50 border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-sky-400 font-medium text-slate-700"
+                  className="flex-1 text-xs px-2 py-1 bg-slate-50 border border-slate-200 rounded font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-sky-500"
                   autoFocus
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') handleCreateList();
+                    if (e.key === 'Escape') setShowAddListForm(false);
+                  }}
                 />
               </div>
-
-              {/* Preset Emoji Picker Grid */}
-              <div className="space-y-1">
-                <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wider select-none">Symbol / Icon wählen:</span>
-                <div className="grid grid-cols-6 gap-2 p-1.5 bg-slate-50 border border-slate-150 rounded-lg max-h-[160px] overflow-y-auto custom-scrollbar">
-                  {PRESET_EMOJIS.map(emoji => (
-                    <button
-                      key={emoji}
-                      type="button"
-                      onClick={() => setNewListIcon(emoji)}
-                      className={`text-lg w-8 h-8 flex items-center justify-center hover:bg-white rounded-lg transition-all cursor-pointer ${newListIcon === emoji ? 'bg-white shadow-3xs scale-110 border border-sky-200' : 'border border-transparent'}`}
-                    >
-                      {emoji}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="flex gap-2 justify-end pt-1 border-t border-slate-100">
+              <div className="flex justify-end space-x-1.5">
                 <button
                   onClick={() => setShowAddListForm(false)}
-                  className="px-2.5 py-1 text-[10px] font-semibold text-slate-500 hover:text-slate-700 border border-slate-200 rounded cursor-pointer"
+                  className="px-2 py-0.5 text-[10px] text-slate-500 hover:bg-slate-100 rounded cursor-pointer"
                 >
                   Abbrechen
                 </button>
                 <button
                   onClick={handleCreateList}
-                  className="px-2.5 py-1 text-[10px] font-bold text-white bg-sky-600 hover:bg-sky-500 rounded shadow-3xs cursor-pointer"
+                  disabled={!newListName.trim()}
+                  className="px-2.5 py-1 text-[10px] font-bold text-white bg-sky-600 hover:bg-sky-500 disabled:opacity-40 rounded shadow-3xs cursor-pointer"
                 >
                   Erstellen
                 </button>
@@ -1170,44 +1445,56 @@ export default function GoogleTasks({ showConfirm }: GoogleTasksProps = {}) {
           )}
         </div>
 
-        {/* Integration Sync Note */}
-        <div className="h-[45px] px-3 bg-slate-50/50 border-t border-notion-border text-[10px] select-none flex items-center shrink-0">
-          {driveToken ? (
+        {/* Integration Sync Footer */}
+        <div className="h-[45px] px-3 bg-slate-50/70 border-t border-slate-200 text-[10px] select-none flex items-center justify-between shrink-0">
+          {authToken ? (
             <div className="flex items-center gap-1.5 font-bold text-slate-650">
               {syncStatus === 'syncing' ? (
                 <>
                   <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-                  <span className="text-[10px]">Synchronisiere...</span>
+                  <span className="text-[10px] text-amber-700">Google Tasks synchronisiert...</span>
                 </>
               ) : syncStatus === 'error' ? (
                 <>
-                  <span className="w-1.5 h-1.5 rounded-full bg-red-450" />
-                  <span className="text-[10px] text-red-600">Sync-Fehler</span>
+                  <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+                  <span className="text-[10px] text-red-600">Google Tasks Fehler</span>
                 </>
               ) : (
                 <>
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                  <span className="text-[10px] text-emerald-650">Drive-Sync aktiv ✅</span>
+                  <span className="text-[10px] text-emerald-700">Google Tasks aktiv ✅</span>
                 </>
               )}
             </div>
           ) : (
-            <div className="text-slate-400 font-sans leading-none">
-              <p className="text-[9.5px] font-medium leading-none">💡 Lokale Speicherung (privat &amp; verschlüsselt)</p>
+            <div className="text-slate-500 font-sans leading-none flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />
+              <span className="text-[9.5px]">Offline (Lokal gespeichert)</span>
             </div>
+          )}
+
+          {authToken && (
+            <a
+              href="https://calendar.google.com"
+              target="_blank"
+              rel="noreferrer"
+              className="text-slate-400 hover:text-sky-600 p-1 rounded"
+              title="Google Tasks / Kalender öffnen"
+            >
+              <ExternalLink className="w-3 h-3" />
+            </a>
           )}
         </div>
       </div>
 
-      {/* Main Task List Area */}
+      {/* 2. Main Tasks View Area */}
       <div className="flex-1 flex flex-col min-w-0 bg-white h-full relative">
         
-        {/* Header toolbar */}
+        {/* Header Toolbar */}
         <div className="border-b border-slate-150 px-4 py-3 select-none flex flex-wrap items-center justify-between gap-3.5 bg-slate-50/40">
           <div className="flex items-center space-x-2 min-w-0">
-            {/* List indicator badge for smaller sizes */}
-            <h2 className="text-sm sm:text-base font-extrabold text-slate-800 tracking-tight leading-none truncate max-w-[220px]">
-              {activeList?.name || '☑️ Dashboard'}
+            <h2 className="text-sm sm:text-base font-extrabold text-slate-800 tracking-tight leading-none truncate max-w-[240px]">
+              {activeList?.name || '☑️ Aufgaben'}
             </h2>
             <span className="text-[10px] bg-sky-50 font-bold border border-sky-200/50 text-sky-600 px-1.5 py-0.5 rounded-full select-none leading-none">
               {activeTasks.length} offen
@@ -1215,12 +1502,12 @@ export default function GoogleTasks({ showConfirm }: GoogleTasksProps = {}) {
           </div>
 
           <div className="flex items-center gap-2">
-            {/* Simple responsive Search input */}
+            {/* Search Input */}
             <div className="relative">
               <Search className="absolute left-2.5 top-2 w-3.5 h-3.5 text-slate-400" />
               <input
                 type="text"
-                placeholder="Durchsuche Aufgaben..."
+                placeholder="Aufgaben durchsuchen..."
                 value={searchQuery}
                 onChange={e => setSearchQuery(e.target.value)}
                 className="pl-8 pr-2.5 py-1 text-xs select-text bg-white border border-slate-200 rounded-lg text-slate-700 placeholder-slate-400/85 focus:outline-none focus:ring-1 focus:ring-sky-500 focus:border-transparent transition-all w-36 sm:w-48"
@@ -1248,6 +1535,17 @@ export default function GoogleTasks({ showConfirm }: GoogleTasksProps = {}) {
                 <option value="starred">Favoriten oben</option>
               </select>
             </div>
+
+            {/* Clear completed button */}
+            {completedTasks.length > 0 && (
+              <button
+                onClick={handleClearCompleted}
+                className="text-[11px] font-bold text-slate-500 hover:text-red-600 border border-slate-200 rounded-md bg-white px-2 py-1 shadow-3xs hover:bg-red-50 transition-colors cursor-pointer"
+                title="Erledigte Aufgaben aus dieser Liste bereinigen"
+              >
+                Erledigte leeren
+              </button>
+            )}
           </div>
         </div>
 
@@ -1258,41 +1556,33 @@ export default function GoogleTasks({ showConfirm }: GoogleTasksProps = {}) {
               <Plus className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-sky-600 pointer-events-none" />
               <input
                 type="text"
-                placeholder="Neue Aufgabe hinzufügen... (Drücke Enter)"
+                placeholder="Neue Google Task hinzufügen... (Enter drücken)"
                 value={newTaskTitle}
                 onChange={e => setNewTaskTitle(e.target.value)}
-                className="w-full h-9 bg-slate-50 border border-slate-200 rounded-lg pl-9.5 pr-26 text-xs text-slate-800 placeholder-slate-400/90 focus:outline-none focus:bg-white focus:ring-1 focus:ring-sky-450 focus:border-transparent transition-all select-text"
+                className="w-full pl-9 pr-24 py-2 text-xs bg-slate-50/80 border border-slate-200 rounded-lg text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-sky-500 focus:bg-white select-text transition-all"
               />
               
-              {/* Star toggle in input */}
-              <button
-                type="button"
-                onClick={() => setNewTaskStarred(!newTaskStarred)}
-                className="absolute right-16.5 top-1/2 -translate-y-1/2 p-1 hover:bg-slate-200/50 rounded-md transition-all flex items-center justify-center cursor-pointer"
-                title="Als wichtig markieren"
-              >
-                <Star 
-                  className={`w-3.5 h-3.5 ${newTaskStarred ? 'fill-amber-400 text-amber-400 animate-pulse' : 'text-slate-400 hover:text-slate-600'}`} 
-                />
-              </button>
+              <div className="absolute right-2 flex items-center space-x-1 select-none">
+                {/* Star Button */}
+                <button
+                  type="button"
+                  onClick={() => setNewTaskStarred(!newTaskStarred)}
+                  className={`p-1 rounded-md transition-colors ${newTaskStarred ? 'text-amber-500 hover:text-amber-600' : 'text-slate-350 hover:text-slate-500'}`}
+                  title={newTaskStarred ? 'Mit Stern priorisiert' : 'Als Favorit markieren'}
+                >
+                  <Star className={`w-3.5 h-3.5 ${newTaskStarred ? 'fill-amber-400' : ''}`} />
+                </button>
 
-              {/* Quick Due Date & Time */}
-              <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
                 {/* Due Time Picker */}
                 <div className="relative flex items-center">
                   <input
                     type="time"
                     value={newTaskDueTime}
-                    onChange={e => {
-                      setNewTaskDueTime(e.target.value);
-                      if (e.target.value && !newTaskDueDate) {
-                        setNewTaskDueDate(new Date().toISOString().split('T')[0]);
-                      }
-                    }}
+                    onChange={e => setNewTaskDueTime(e.target.value)}
                     className="w-6 h-6 opacity-0 absolute cursor-pointer z-10"
-                    title="Uhrzeit hinzufügen"
+                    title="Uhrzeit für Erinnerung festlegen"
                   />
-                  <div className={`p-1 rounded-md border text-slate-450 flex items-center justify-center ${newTaskDueTime ? 'bg-sky-50 text-sky-600 border-sky-100' : 'border-transparent hover:bg-slate-100'}`}>
+                  <div className={`p-1 rounded-md border text-slate-455 flex items-center justify-center ${newTaskDueTime ? 'bg-sky-50 text-sky-600 border-sky-100' : 'border-transparent hover:bg-slate-100'}`}>
                     <Clock className="w-3.5 h-3.5" />
                   </div>
                 </div>
@@ -1345,11 +1635,16 @@ export default function GoogleTasks({ showConfirm }: GoogleTasksProps = {}) {
           
           {/* Active Tasks Grid */}
           <div>
-            {activeTasks.length === 0 ? (
+            {isInitialLoading ? (
+              <div className="py-12 text-center text-slate-400">
+                <RefreshCw className="w-6 h-6 text-sky-500 animate-spin mx-auto mb-2" />
+                <p className="text-xs font-semibold">Lade Google Tasks...</p>
+              </div>
+            ) : activeTasks.length === 0 ? (
               <div className="py-12 text-center text-slate-400">
                 <Sparkles className="w-8 h-8 text-sky-400/50 mx-auto mb-2" />
                 <p className="text-xs font-medium">Alle erledigt oder keine Aufgaben in dieser Liste.</p>
-                <p className="text-[10px] text-slate-300 mt-1">Leg gleich eine neue To-Do oben an!</p>
+                <p className="text-[10px] text-slate-300 mt-1">Erstelle oben einfach eine neue Aufgabe!</p>
               </div>
             ) : (
               <div className="space-y-2">
@@ -1357,7 +1652,6 @@ export default function GoogleTasks({ showConfirm }: GoogleTasksProps = {}) {
                   const subtaskCount = task.subtasks.length;
                   const completedSubs = task.subtasks.filter(sub => sub.completed).length;
                   const isExpanded = !!expandedSubtasks[task.id];
-                  const hasDetails = task.notes || task.dueDate || subtaskCount > 0;
 
                   return (
                     <div
@@ -1421,7 +1715,7 @@ export default function GoogleTasks({ showConfirm }: GoogleTasksProps = {}) {
                           </div>
                         </div>
 
-                        {/* Star / Favourite Option */}
+                        {/* Star / Favourite Option & Delete Button */}
                         <div className="flex items-center gap-1 shrink-0 select-none">
                           <button
                             onClick={(e) => {
@@ -1429,6 +1723,7 @@ export default function GoogleTasks({ showConfirm }: GoogleTasksProps = {}) {
                               handleToggleTaskStar(task.id);
                             }}
                             className="p-1 hover:bg-slate-100 rounded-md transition-colors"
+                            title="Stern / Priorität"
                           >
                             <Star
                               className={`w-4.5 h-4.5 ${
@@ -1437,6 +1732,16 @@ export default function GoogleTasks({ showConfirm }: GoogleTasksProps = {}) {
                                   : 'text-slate-300 opacity-25 group-hover/task:opacity-100 hover:text-slate-500 hover:scale-110 active:scale-95 transition-all'
                               }`}
                             />
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteTask(task.id, task.title);
+                            }}
+                            className="p-1 text-slate-300 opacity-0 group-hover/task:opacity-100 hover:text-red-500 hover:bg-red-50 rounded-md transition-all cursor-pointer"
+                            title="Aufgabe löschen"
+                          >
+                            <Trash2 className="w-4 h-4" />
                           </button>
                         </div>
                       </div>
@@ -1490,13 +1795,22 @@ export default function GoogleTasks({ showConfirm }: GoogleTasksProps = {}) {
           {/* Completed Tasks section */}
           {sortedCompletedTasks.length > 0 && (
             <div className="pt-3 border-t border-slate-100 animate-in fade-in duration-300">
-              <button
-                onClick={() => setCompletedCollapsed(!completedCollapsed)}
-                className="flex items-center gap-1.5 text-slate-500 hover:text-slate-800 text-xs font-bold py-1 px-2 hover:bg-slate-100 rounded-md transition-all select-none"
-              >
-                {completedCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                <span>Abgeschlossen ({sortedCompletedTasks.length})</span>
-              </button>
+              <div className="flex items-center justify-between">
+                <button
+                  onClick={() => setCompletedCollapsed(!completedCollapsed)}
+                  className="flex items-center gap-1.5 text-slate-500 hover:text-slate-800 text-xs font-bold py-1 px-2 hover:bg-slate-100 rounded-md transition-all select-none cursor-pointer"
+                >
+                  {completedCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                  <span>Abgeschlossen ({sortedCompletedTasks.length})</span>
+                </button>
+
+                <button
+                  onClick={handleClearCompleted}
+                  className="text-[10px] text-slate-400 hover:text-red-600 font-semibold px-2 py-0.5 rounded hover:bg-red-50 transition-colors cursor-pointer"
+                >
+                  Bereinigen
+                </button>
+              </div>
 
               {!completedCollapsed && (
                 <div className="mt-2.5 space-y-2 pl-1 animate-in fade-in duration-200">
@@ -1563,7 +1877,7 @@ export default function GoogleTasks({ showConfirm }: GoogleTasksProps = {}) {
         </div>
       </div>
 
-      {/* Slide-In Side Drawer for Edit details (Right Sidebar style matching authentic Google Tasks) */}
+      {/* 3. Slide-In Side Drawer for Edit details (Right Sidebar style matching authentic Google Tasks) */}
       {selectedTaskId && activeDetailTask && (
         <div className="w-80 shrink-0 border-l border-slate-200 bg-white flex flex-col justify-between h-full shadow-md z-15 animate-in slide-in-from-right duration-250 select-none">
           
@@ -1674,35 +1988,34 @@ export default function GoogleTasks({ showConfirm }: GoogleTasksProps = {}) {
                   <option value="monthly">🔄 Monatlich wiederholen</option>
                   <option value="yearly">🔄 Jährlich wiederholen</option>
                 </select>
-                <div className="absolute right-3 top-2.5 pointer-events-none text-slate-400 text-[10px] select-none">
-                  ▼
-                </div>
               </div>
-              <p className="text-[9px] text-slate-400 font-sans leading-tight mt-1">
-                Wenn aktiviert, wird beim Abhaken automatisch der nächste Termin in der Zukunft geplant (Täglich/Wöchentlich...) und ein erledigter Eintrag archiviert.
-              </p>
             </div>
 
-            {/* Subtasks listing */}
+            {/* Hierarchical Subtasks section */}
             <div className="space-y-2">
-              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wide flex items-center gap-1">
-                <ListTodo className="w-3.5 h-3.5" />
-                Teilaufgaben ({activeDetailTask.subtasks.filter(s => !s.completed).length} offen)
+              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wide flex items-center justify-between">
+                <span className="flex items-center gap-1">
+                  <ListTodo className="w-3 h-3 text-sky-500" />
+                  Teilaufgaben
+                </span>
+                <span className="text-[9px] font-semibold text-slate-400">
+                  {activeDetailTask.subtasks.filter(s => s.completed).length}/{activeDetailTask.subtasks.length}
+                </span>
               </label>
 
-              {/* Add inline subtask form */}
-              <form onSubmit={handleAddSubtask} className="flex gap-1.5">
+              {/* Add subtask input */}
+              <form onSubmit={handleAddSubtask} className="flex gap-1.5 items-center">
                 <input
                   type="text"
-                  placeholder="Neue Teilaufgabe..."
+                  placeholder="Unteraufgabe eingeben..."
                   value={newSubtaskTitle}
                   onChange={e => setNewSubtaskTitle(e.target.value)}
-                  className="flex-1 text-xs px-2.5 py-1.5 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-sky-450 bg-slate-50/30 select-text"
+                  className="flex-1 text-xs border border-slate-200 rounded-lg p-1.5 focus:outline-none focus:ring-1 focus:ring-sky-400 bg-slate-50/30 select-text"
                 />
                 <button
                   type="submit"
                   disabled={!newSubtaskTitle.trim()}
-                  className="p-1.5 rounded-lg bg-sky-100 hover:bg-sky-200 disabled:opacity-40 text-sky-700 transition-colors cursor-pointer"
+                  className="p-1.5 bg-sky-500 hover:bg-sky-600 disabled:opacity-40 text-white rounded-lg shadow-3xs cursor-pointer"
                   title="Unteraufgabe anlegen"
                 >
                   <Plus className="w-4 h-4" />

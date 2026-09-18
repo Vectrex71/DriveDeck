@@ -28,8 +28,113 @@ import {
   Loader2
 } from 'lucide-react';
 import { StickyNoteData, StickyAttachment } from '../types';
-import { executeStickyNotesSync } from '../lib/driveSync';
+import { executeStickyNotesSync, registerDeletedId } from '../lib/driveSync';
 import { initAuth } from '../lib/googleAuth';
+import { useLanguage } from '../lib/LanguageContext';
+
+const GERMAN_WELCOME_NOTES: Array<Omit<StickyNoteData, 'createdAt' | 'updatedAt'>> = [
+  {
+    id: 'note-welcome-1',
+    title: 'Willkommen bei den Haftnotizen! 📌',
+    content: 'Das ist dein neuer, dedizierter Bereich für schnelle Gedanken, Geistesblitze, Todo-Fragmente oder Telefonnotizen.\n\nDu kannst diese Notizen direkt bearbeiten – klicke einfach in den Text!\n\n✓ Wird immer live im Browser gesichert.',
+    color: 'yellow',
+    pinned: true,
+    position: 0
+  },
+  {
+    id: 'note-welcome-2',
+    title: 'Neu: Drag and Drop Sortierung! ↕',
+    content: 'Halte einfach das Griff-Symbol oben links gedrückt und ziehe den Zettel zur Seite, um die Reihenfolge manuell zu verändern.\n\nDeine ganz persönliche Anordnung wird live gesichert!',
+    color: 'purple',
+    pinned: false,
+    position: 1
+  },
+  {
+    id: 'note-welcome-3',
+    title: 'Cloud-Sync über Google Drive ☁',
+    content: 'Hast du dich oben über Google angemeldet? Deine Haftnotizen werden vollautomatisch im Hintergrund in deinen versteckten Anwendungsordner (appDataFolder) hochgeladen. Dadurch sind sie auf all deinen Geräten perfekt synchronisiert!',
+    color: 'blue',
+    pinned: false,
+    position: 2
+  },
+  {
+    id: 'note-welcome-4',
+    title: '100% Mobil & Responsiv! 📱',
+    content: 'Egal ob auf dem Desktop, Tablet oder Smartphone: Dieses Dashboard passt sich automatisch an.\n\nAuf mobilen Bildschirmen lassen sich Notizen wunderbar scrollen und verwalten. Probier es gleich aus!',
+    color: 'green',
+    pinned: false,
+    position: 3
+  }
+];
+
+const ENGLISH_WELCOME_NOTES: Array<Omit<StickyNoteData, 'createdAt' | 'updatedAt'>> = [
+  {
+    id: 'note-welcome-1',
+    title: 'Welcome to Sticky Notes! 📌',
+    content: 'This is your dedicated workspace for quick ideas, flash thoughts, todo snippets, or call notes.\n\nYou can edit these notes directly – simply click into the text!\n\n✓ Automatically saved in real-time in your browser.',
+    color: 'yellow',
+    pinned: true,
+    position: 0
+  },
+  {
+    id: 'note-welcome-2',
+    title: 'New: Drag & Drop Sorting! ↕',
+    content: 'Simply hold the grip handle on the top left and drag the sticky note to rearrange your board manually.\n\nYour custom arrangement is saved live!',
+    color: 'purple',
+    pinned: false,
+    position: 1
+  },
+  {
+    id: 'note-welcome-3',
+    title: 'Cloud Sync via Google Drive ☁',
+    content: 'Connected your Google account? Your sticky notes automatically back up to your secure appDataFolder in the background, keeping all your devices in sync!',
+    color: 'blue',
+    pinned: false,
+    position: 2
+  },
+  {
+    id: 'note-welcome-4',
+    title: '100% Mobile & Responsive! 📱',
+    content: 'Whether on desktop, tablet, or smartphone: this dashboard adapts automatically.\n\nOn mobile screens, notes are easy to scroll and organize. Give it a try!',
+    color: 'green',
+    pinned: false,
+    position: 3
+  }
+];
+
+const getWelcomeNotesForLanguage = (lang: string): StickyNoteData[] => {
+  const templates = lang === 'en' ? ENGLISH_WELCOME_NOTES : GERMAN_WELCOME_NOTES;
+  const now = Date.now();
+  return templates.map((t, idx) => ({
+    ...t,
+    createdAt: now - idx * 30000,
+    updatedAt: now - idx * 30000
+  }));
+};
+
+const getFilterColors = (lang: string) => [
+  { value: 'all', label: lang === 'de' ? 'Alle Farben 🎨' : 'All Colors 🎨', bg: 'bg-gradient-to-tr from-amber-400 via-emerald-400 to-sky-450' },
+  { value: 'yellow', label: lang === 'de' ? 'Gelbe Notizen' : 'Yellow Notes', bg: 'bg-amber-400' },
+  { value: 'green', label: lang === 'de' ? 'Grüne Notizen' : 'Green Notes', bg: 'bg-emerald-400' },
+  { value: 'blue', label: lang === 'de' ? 'Blaue Notizen' : 'Blue Notes', bg: 'bg-sky-400' },
+  { value: 'pink', label: lang === 'de' ? 'Rosa Notizen' : 'Pink Notes', bg: 'bg-rose-400' },
+  { value: 'purple', label: lang === 'de' ? 'Violette Notizen' : 'Purple Notes', bg: 'bg-purple-400' },
+  { value: 'orange', label: lang === 'de' ? 'Orange Notizen' : 'Orange Notes', bg: 'bg-orange-400' },
+  { value: 'gray', label: lang === 'de' ? 'Graue Notizen' : 'Gray Notes', bg: 'bg-slate-400' },
+];
+
+const getColorLabel = (color: string, lang: string) => {
+  const map: Record<string, { de: string; en: string }> = {
+    yellow: { de: 'Gelb', en: 'Yellow' },
+    green: { de: 'Grün', en: 'Green' },
+    blue: { de: 'Blau', en: 'Blue' },
+    pink: { de: 'Pink', en: 'Pink' },
+    purple: { de: 'Violett', en: 'Purple' },
+    orange: { de: 'Orange', en: 'Orange' },
+    gray: { de: 'Grau', en: 'Gray' }
+  };
+  return map[color]?.[lang === 'de' ? 'de' : 'en'] || color;
+};
 
 const getAttachmentIcon = (att: StickyAttachment) => {
   if (att.type === 'drive') {
@@ -242,23 +347,14 @@ const COLOR_CLASSES = {
   }
 };
 
-const FILTER_COLORS = [
-  { value: 'all', label: 'Alle Farben 🎨', bg: 'bg-gradient-to-tr from-amber-400 via-emerald-400 to-sky-450' },
-  { value: 'yellow', label: 'Gelbe Notizen', bg: 'bg-amber-400' },
-  { value: 'green', label: 'Grüne Notizen', bg: 'bg-emerald-400' },
-  { value: 'blue', label: 'Blaue Notizen', bg: 'bg-sky-400' },
-  { value: 'pink', label: 'Rosa Notizen', bg: 'bg-rose-400' },
-  { value: 'purple', label: 'Violette Notizen', bg: 'bg-purple-400' },
-  { value: 'orange', label: 'Orange Notizen', bg: 'bg-orange-400' },
-  { value: 'gray', label: 'Graue Notizen', bg: 'bg-slate-400' },
-];
-
 interface StickyNotesProps {
   isCreationBlocked?: boolean;
   onBlockedCreation?: () => void;
 }
 
 export default function StickyNotes({ isCreationBlocked = false, onBlockedCreation }: StickyNotesProps = {}) {
+  const { language } = useLanguage();
+  const filterColors = getFilterColors(language);
   const [notes, setNotes] = useState<StickyNoteData[]>([]);
   const skipNextSyncRef = useRef(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -301,51 +397,32 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
       const stored = localStorage.getItem('drivedeck_sticky_notes');
       if (stored) {
         initialNotes = JSON.parse(stored);
+        // If stored notes contain unmodified default welcome notes, convert them to active language
+        const targetList = language === 'en' ? ENGLISH_WELCOME_NOTES : GERMAN_WELCOME_NOTES;
+        const otherList = language === 'en' ? GERMAN_WELCOME_NOTES : ENGLISH_WELCOME_NOTES;
+        let converted = false;
+        initialNotes = initialNotes.map((note) => {
+          const otherDemo = otherList.find(d => d.id === note.id);
+          const targetDemo = targetList.find(d => d.id === note.id);
+          if (otherDemo && targetDemo) {
+            if (note.title === otherDemo.title || note.content === otherDemo.content) {
+              converted = true;
+              return {
+                ...note,
+                title: targetDemo.title,
+                content: targetDemo.content
+              };
+            }
+          }
+          return note;
+        });
+        if (converted) {
+          localStorage.setItem('drivedeck_sticky_notes', JSON.stringify(initialNotes));
+        }
         setNotes(initialNotes);
       } else {
-        // Seed initial notes
-        initialNotes = [
-          {
-            id: 'note-welcome-1',
-            title: 'Willkommen bei den Haftnotizen! 📌',
-            content: 'Das ist dein neuer, dedizierter Bereich für schnelle Gedanken, Geistesblitze, Todo-Fragmente oder Telefonnotizen.\n\nDu kannst diese Notizen direkt bearbeiten – klicke einfach in den Text!\n\n✓ Wird immer live im Browser gesichert.',
-            color: 'yellow',
-            pinned: true,
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-            position: 0
-          },
-          {
-            id: 'note-welcome-2',
-            title: 'Neu: Drag and Drop Sortierung! ↕',
-            content: 'Halte einfach das Griff-Symbol oben links gedrückt und ziehe den Zettel zur Seite, um die Reihenfolge manuell zu verändern.\n\nDeine ganz persönliche Anordnung wird live gesichert!',
-            color: 'purple',
-            pinned: false,
-            createdAt: Date.now() - 30000,
-            updatedAt: Date.now() - 30000,
-            position: 1
-          },
-          {
-            id: 'note-welcome-3',
-            title: 'Cloud-Sync über Google Drive ☁',
-            content: 'Hast du dich oben über Google angemeldet? Deine Haftnotizen werden vollautomatisch im Hintergrund in deinen versteckten Anwendungsordner (appDataFolder) hochgeladen. Dadurch sind sie auf all deinen Geräten perfekt synchronisiert!',
-            color: 'blue',
-            pinned: false,
-            createdAt: Date.now() - 60000,
-            updatedAt: Date.now() - 60000,
-            position: 2
-          },
-          {
-            id: 'note-welcome-4',
-            title: '100% Mobil & Responsiv! 📱',
-            content: 'Egal ob auf dem Desktop, Tablet oder Smartphone: Dieses Dashboard passt sich automatisch an.\n\nAuf mobilen Bildschirmen lassen sich Notizen wunderbar scrollen und verwalten. Probier es gleich aus!',
-            color: 'green',
-            pinned: false,
-            createdAt: Date.now() - 120000,
-            updatedAt: Date.now() - 120000,
-            position: 3
-          }
-        ];
+        // Seed initial notes in the active language
+        initialNotes = getWelcomeNotesForLanguage(language);
         setNotes(initialNotes);
         localStorage.setItem('drivedeck_sticky_notes', JSON.stringify(initialNotes));
       }
@@ -374,6 +451,38 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
       setSyncStatus('idle');
     }
   }, []);
+
+  // Update demo notes language dynamically when user switches language
+  useEffect(() => {
+    setNotes((prevNotes) => {
+      if (!prevNotes || prevNotes.length === 0) return prevNotes;
+      const targetList = language === 'en' ? ENGLISH_WELCOME_NOTES : GERMAN_WELCOME_NOTES;
+      const otherList = language === 'en' ? GERMAN_WELCOME_NOTES : ENGLISH_WELCOME_NOTES;
+      let changed = false;
+
+      const updated = prevNotes.map((note) => {
+        const otherDemo = otherList.find(d => d.id === note.id);
+        const targetDemo = targetList.find(d => d.id === note.id);
+        if (otherDemo && targetDemo) {
+          if (note.title === otherDemo.title || note.content === otherDemo.content) {
+            changed = true;
+            return {
+              ...note,
+              title: targetDemo.title,
+              content: targetDemo.content
+            };
+          }
+        }
+        return note;
+      });
+
+      if (changed) {
+        localStorage.setItem('drivedeck_sticky_notes', JSON.stringify(updated));
+        return updated;
+      }
+      return prevNotes;
+    });
+  }, [language]);
 
   // Save changes locally
   const saveNotesToStore = (newNotes: StickyNoteData[]) => {
@@ -503,12 +612,6 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
 
   // Add a new note
   const handleAddNote = (color: keyof typeof COLOR_CLASSES = 'yellow') => {
-    if (isCreationBlocked) {
-      if (onBlockedCreation) {
-        onBlockedCreation();
-      }
-      return;
-    }
     // Determine highest current position to append at the end of ranks
     const maxPos = notes.reduce((max, n) => (n.position ?? 0) > max ? (n.position ?? 0) : max, 0);
     
@@ -556,6 +659,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
 
   // Delete notes with direct overwrite synchronization
   const handleDeleteNote = async (id: string) => {
+    registerDeletedId(id);
     const updated = notes.filter(note => note.id !== id);
     skipNextSyncRef.current = true;
     saveNotesToStore(updated);
@@ -784,11 +888,13 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                 <Pin className="w-5 h-5 -rotate-45" />
               </span>
               <div>
-                <h1 className="text-sm sm:text-base font-bold text-slate-800 leading-tight">Privater Haftnotiz-Bereich</h1>
+                <h1 className="text-sm sm:text-base font-bold text-slate-800 leading-tight">
+                  {language === 'de' ? 'Privater Haftnotiz-Bereich' : 'Private Sticky Notes Board'}
+                </h1>
                 
                 {/* Responsive subtitle */}
                 <p className="text-[10px] sm:text-xs text-slate-400 font-semibold leading-none mt-1">
-                  Memos &amp; Geistesblitze in Sekundenschnelle festhalten
+                  {language === 'de' ? 'Memos & Geistesblitze in Sekundenschnelle festhalten' : 'Capture memos & quick thoughts in seconds'}
                 </p>
               </div>
             </div>
@@ -796,7 +902,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
             {/* Live Autosave tick element */}
             <div className="flex items-center gap-1 text-[10px] font-bold select-none text-emerald-600 bg-emerald-50 border border-emerald-100/50 px-2 py-1 rounded-full opacity-0 transition-all duration-300 pointer-events-none" style={{ opacity: showAutoSaveTick ? 1 : 0 }}>
               <CheckCheck className="w-3.5 h-3.5" />
-              <span className="hidden xs:inline">Live gespeichert</span>
+              <span className="hidden xs:inline">{language === 'de' ? 'Live gespeichert' : 'Saved live'}</span>
             </div>
           </div>
 
@@ -808,7 +914,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
               <Search className="absolute left-2.5 top-2.5 w-3.5 h-3.5 text-slate-400" />
               <input 
                 type="text"
-                placeholder="Notizen durchsuchen..."
+                placeholder={language === 'de' ? 'Notizen durchsuchen...' : 'Search notes...'}
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="w-full pl-8 pr-3 py-1.5 bg-slate-50/90 hover:bg-slate-50 border border-slate-200 focus:border-accent-blue rounded-lg text-xs font-semibold focus:outline-none placeholder:text-slate-400 transition-all"
@@ -837,7 +943,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                     }`} />
                   )}
                   <span>
-                    {FILTER_COLORS.find(item => item.value === filterColor)?.label || 'Farben'}
+                    {filterColors.find(item => item.value === filterColor)?.label || (language === 'de' ? 'Farben' : 'Colors')}
                   </span>
                 </div>
               </button>
@@ -850,7 +956,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                     onClick={() => setIsColorFilterOpen(false)} 
                   />
                   <div className="absolute right-0 mt-1.5 w-48 bg-white border border-slate-200/90 rounded-xl shadow-lg z-50 py-1.5 animate-in fade-in slide-in-from-top-1 duration-150">
-                    {FILTER_COLORS.map((item) => {
+                    {filterColors.map((item) => {
                       const isSelected = filterColor === item.value;
                       return (
                         <button
@@ -883,9 +989,9 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                 value={filterTag}
                 onChange={(e) => setFilterTag(e.target.value)}
                 className="appearance-none bg-slate-50/90 hover:bg-slate-50 border border-slate-200 text-xs font-bold pl-3 pr-7 py-1.5 rounded-lg focus:outline-none focus:border-accent-blue cursor-pointer transition-colors"
-                title="Nach Label filtern"
+                title={language === 'de' ? 'Nach Label filtern' : 'Filter by label'}
               >
-                <option value="all">Alle Labels 🏷️</option>
+                <option value="all">{language === 'de' ? 'Alle Labels 🏷️' : 'All Labels 🏷️'}</option>
                 {allAvailableTags.map(tag => (
                   <option key={tag} value={tag}>{tag}</option>
                 ))}
@@ -901,12 +1007,12 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                 value={sortBy}
                 onChange={(e) => setSortBy(e.target.value as any)}
                 className="appearance-none bg-slate-50/90 hover:bg-slate-50 border border-slate-200 text-xs font-bold pl-2.5 pr-7 py-1.5 rounded-lg focus:outline-none focus:border-accent-blue cursor-pointer transition-colors"
-                title="Sortieren nach"
+                title={language === 'de' ? 'Sortieren nach' : 'Sort by'}
               >
-                <option value="position">Manuell</option>
-                <option value="updated">Zuletzt aktualisiert</option>
-                <option value="created">Neu erstellt</option>
-                <option value="title">Titel (A-Z)</option>
+                <option value="position">{language === 'de' ? 'Manuell' : 'Manual'}</option>
+                <option value="updated">{language === 'de' ? 'Zuletzt aktualisiert' : 'Recently updated'}</option>
+                <option value="created">{language === 'de' ? 'Neu erstellt' : 'Newest'}</option>
+                <option value="title">{language === 'de' ? 'Titel (A-Z)' : 'Title (A-Z)'}</option>
               </select>
               <div className="absolute right-2.5 top-2.5 pointer-events-none text-slate-400">
                 <ArrowUpDown className="w-3.5 h-3.5" />
@@ -919,7 +1025,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
               className="px-3.5 py-1.5 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-xs font-extrabold flex items-center gap-1.5 shadow-2xs select-none cursor-pointer transition-all ml-auto md:ml-0 animate-in fade-in"
             >
               <Plus className="w-4 h-4" />
-              <span>Haftnotiz</span>
+              <span>{language === 'de' ? 'Haftnotiz' : 'Sticky Note'}</span>
             </button>
           </div>
         </div>
@@ -934,9 +1040,13 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
               <div className="w-12 h-12 rounded-full bg-slate-50 border border-slate-100 flex items-center justify-center mb-3">
                 <Search className="w-5 h-5 text-slate-400" />
               </div>
-              <h3 className="text-xs font-extrabold text-slate-800">Keine Haftnotizen gefunden</h3>
+              <h3 className="text-xs font-extrabold text-slate-800">
+                {language === 'de' ? 'Keine Haftnotizen gefunden' : 'No sticky notes found'}
+              </h3>
               <p className="text-[11px] text-slate-400 mt-1 max-w-sm">
-                Es wurden keine Haftnotizen für deine Filtereinstellungen gefunden. Erstelle jetzt einen neuen gelben Zettel!
+                {language === 'de' 
+                  ? 'Es wurden keine Haftnotizen für deine Filtereinstellungen gefunden. Erstelle jetzt einen neuen gelben Zettel!'
+                  : 'No sticky notes match your current filter settings. Create a new note now!'}
               </p>
               <button
                 onClick={() => {
@@ -947,7 +1057,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                 className="mt-4 px-4 py-2 bg-[#0288D1] hover:opacity-95 text-white text-xs font-extrabold rounded-lg shadow-sm cursor-pointer transition-all flex items-center gap-1.5"
               >
                 <Plus className="w-4 h-4" />
-                <span>Erste Haftnotiz hinzufügen</span>
+                <span>{language === 'de' ? 'Erste Haftnotiz hinzufügen' : 'Add first sticky note'}</span>
               </button>
             </div>
           ) : (
@@ -981,7 +1091,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                           onMouseDown={() => setDragAllowedId(note.id)}
                           onMouseUp={() => setDragAllowedId(null)}
                           className="p-1 cursor-grab active:cursor-grabbing text-slate-400 hover:text-slate-600 hover:bg-black/5 rounded-md transition-colors"
-                          title="Haftnotiz verschieben (Ziehen)"
+                          title={language === 'de' ? 'Haftnotiz verschieben (Ziehen)' : 'Drag to reorder'}
                         >
                           <GripHorizontal className="w-4 h-4" />
                         </div>
@@ -994,7 +1104,9 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                               ? 'bg-red-500 text-white hover:bg-red-650 rotate-0 scale-105' 
                               : 'bg-white/80 hover:bg-white border border-slate-200/50 text-slate-400 hover:text-slate-600 hover:scale-110 -rotate-45'
                           }`}
-                          title={note.pinned ? "Haftnotiz lösen" : "Oben anpinnen"}
+                          title={note.pinned 
+                            ? (language === 'de' ? 'Haftnotiz lösen' : 'Unpin note') 
+                            : (language === 'de' ? 'Oben anpinnen' : 'Pin to top')}
                         >
                           <Pin className="w-3.5 h-3.5 shrink-0" />
                         </button>
@@ -1004,7 +1116,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                       <div className="flex items-start justify-between gap-3 shrink-0">
                         <input 
                           type="text"
-                          placeholder="Titel..."
+                          placeholder={language === 'de' ? 'Titel...' : 'Title...'}
                           value={note.title}
                           onChange={(e) => handleUpdateNote(note.id, { title: e.target.value })}
                           className={`w-full bg-transparent font-extrabold text-sm sm:text-base tracking-tight placeholder:opacity-35 focus:outline-none border-b border-transparent focus:border-slate-350/20 pb-0.5 truncate ${colorConfig.titleColor}`}
@@ -1013,7 +1125,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                         <button
                           onClick={() => handleDeleteNote(note.id)}
                           className="p-1 px-1.5 text-slate-400 hover:text-red-600 rounded-md hover:bg-black/5 cursor-pointer shrink-0 transition-colors"
-                          title="Haftnotiz löschen"
+                          title={language === 'de' ? 'Haftnotiz löschen' : 'Delete note'}
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
@@ -1043,7 +1155,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                                       handleRemoveAttachment(note.id, img.id);
                                     }}
                                     className="p-1 px-1.5 bg-red-650 hover:bg-red-700 text-white rounded-lg cursor-pointer shadow-xs transition-colors"
-                                    title="Bild löschen"
+                                    title={language === 'de' ? 'Bild löschen' : 'Delete image'}
                                   >
                                     <Trash2 className="w-3.5 h-3.5" />
                                   </button>
@@ -1057,7 +1169,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                       <div className="flex-1 min-h-0 pl-2 flex flex-col">
                         {editingNoteId === note.id ? (
                           <textarea
-                            placeholder="Inhalt aufschreiben..."
+                            placeholder={language === 'de' ? 'Inhalt aufschreiben...' : 'Write something...'}
                             value={note.content}
                             onChange={(e) => handleUpdateNote(note.id, { content: e.target.value })}
                             onBlur={() => setEditingNoteId(null)}
@@ -1069,7 +1181,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                             onClick={() => setEditingNoteId(note.id)}
                             className={`w-full h-full text-xs sm:text-sm leading-relaxed font-sans font-medium overflow-y-auto whitespace-pre-wrap cursor-text select-text ${colorConfig.textColor} ${!note.content ? 'italic opacity-40' : ''}`}
                           >
-                            {note.content ? renderTextWithLinks(note.content) : "Inhalt aufschreiben..."}
+                            {note.content ? renderTextWithLinks(note.content) : (language === 'de' ? 'Inhalt aufschreiben...' : 'Write something...')}
                           </div>
                         )}
                       </div>
@@ -1090,7 +1202,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                         return (
                           <div className="mt-2 pl-2 pr-1 shrink-0 animate-in fade-in duration-300">
                             <span className="text-[9px] uppercase font-mono tracking-wider text-slate-400 font-extrabold block mb-1">
-                              Anhang-Vorschau 🌐
+                              {language === 'de' ? 'Anhang-Vorschau 🌐' : 'Attachment Preview 🌐'}
                             </span>
                             <RichLinkPreview url={firstUrl} />
                           </div>
@@ -1174,7 +1286,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                                       handleRemoveAttachment(note.id, att.id);
                                     }}
                                     className="p-1 opacity-60 group-hover/att:opacity-100 hover:bg-black/10 text-slate-500 hover:text-red-700 rounded transition-all cursor-pointer"
-                                    title="Anhang entfernen"
+                                    title={language === 'de' ? 'Anhang entfernen' : 'Remove attachment'}
                                   >
                                     <X className="w-3 h-3" />
                                   </button>
@@ -1188,14 +1300,14 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                       <div className="pt-2.5 border-t border-slate-400/10 flex items-center justify-between gap-2 shrink-0 select-none">
                         <div className="flex items-center gap-2">
                           <span className="text-[9px] font-bold text-slate-400 font-mono">
-                            {new Date(note.updatedAt).toLocaleDateString('de-DE', { hour: '2-digit', minute: '2-digit' })}
+                            {new Date(note.updatedAt).toLocaleDateString(language === 'de' ? 'de-DE' : 'en-US', { hour: '2-digit', minute: '2-digit' })}
                           </span>
 
                           <button
                             type="button"
                             onClick={() => setActivePopup({ noteId: note.id, type: 'tag' })}
                             className="p-1 hover:bg-black/5 text-slate-400 hover:text-slate-700 rounded transition-all cursor-pointer"
-                            title="Labels verwalten"
+                            title={language === 'de' ? 'Labels verwalten' : 'Manage labels'}
                           >
                             <Tag className="w-3 h-3" />
                           </button>
@@ -1204,7 +1316,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                             type="button"
                             onClick={() => setActivePopup({ noteId: note.id, type: 'attach' })}
                             className="p-1 hover:bg-black/5 text-slate-400 hover:text-slate-700 rounded transition-all cursor-pointer"
-                            title="Dateien, Link oder Bild anhängen"
+                            title={language === 'de' ? 'Dateien, Link oder Bild anhängen' : 'Attach file, link or image'}
                           >
                             <Plus className="w-3 h-3" />
                           </button>
@@ -1224,7 +1336,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                                 className={`w-3.5 h-3.5 rounded-full border cursor-pointer transition-all ${config.pickerBtn} ${
                                   isSelected ? 'ring-2 ring-sky-500 scale-110 shadow-4xs' : 'hover:scale-105 opacity-80'
                                 }`}
-                                title={`Farbe auf ${config.label} ändern`}
+                                title={language === 'de' ? `Farbe auf ${config.label} ändern` : `Change color to ${getColorLabel(col, 'en')}`}
                               />
                             );
                           })}
@@ -1239,7 +1351,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                               <div className="flex items-center justify-between border-b border-slate-100 pb-2 shrink-0">
                                 <span className="text-xs font-extrabold text-slate-800 flex items-center gap-1">
                                   <Tag className="w-3.5 h-3.5 text-slate-500" />
-                                  Labels verwalten
+                                  {language === 'de' ? 'Labels verwalten' : 'Manage labels'}
                                 </span>
                                 <button 
                                   type="button"
@@ -1265,7 +1377,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                                 <input 
                                   name="newTag"
                                   type="text"
-                                  placeholder="Neues Label..."
+                                  placeholder={language === 'de' ? 'Neues Label...' : 'New label...'}
                                   className="flex-1 bg-slate-50 border border-slate-200 rounded-lg text-xs font-semibold px-2 py-1.5 focus:outline-none focus:border-sky-500"
                                 />
                                 <button 
@@ -1278,10 +1390,12 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
 
                               <div className="flex-1 overflow-y-auto mt-2 min-h-0">
                                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">
-                                  Vorschläge
+                                  {language === 'de' ? 'Vorschläge' : 'Suggestions'}
                                 </span>
                                 {allAvailableTags.filter(t => !note.tags?.includes(t)).length === 0 ? (
-                                  <p className="text-[10px] text-slate-400 italic">Keine weiteren Vorschläge</p>
+                                  <p className="text-[10px] text-slate-400 italic">
+                                    {language === 'de' ? 'Keine weiteren Vorschläge' : 'No more suggestions'}
+                                  </p>
                                 ) : (
                                   <div className="flex flex-wrap gap-1">
                                     {allAvailableTags
@@ -1306,7 +1420,9 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                           {activePopup.type === 'attach' && (
                             <div className="flex flex-col h-full justify-between">
                               <div className="flex items-center justify-between border-b border-slate-150 pb-2">
-                                <span className="text-xs font-extrabold text-slate-800">Anhang hinzufügen</span>
+                                <span className="text-xs font-extrabold text-slate-800">
+                                  {language === 'de' ? 'Anhang hinzufügen' : 'Add attachment'}
+                                </span>
                                 <button 
                                   type="button" 
                                   onClick={() => setActivePopup(null)}
@@ -1321,7 +1437,9 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                                   type="button"
                                   onClick={() => {
                                     if (!hasLoggedInToken) {
-                                      alert("Bitte erstelle eine Google-Verbindung über das Profil-Symbol oben, um deine Drive Dokumente einzubinden.");
+                                      alert(language === 'de'
+                                        ? "Bitte erstelle eine Google-Verbindung über das Profil-Symbol oben, um deine Drive Dokumente einzubinden."
+                                        : "Please connect your Google account via the profile icon above to link your Drive documents.");
                                       return;
                                     }
                                     setAttachingToNoteId(note.id);
@@ -1333,7 +1451,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                                   className="w-full flex items-center gap-2.5 px-3 py-2 text-left hover:bg-sky-50 hover:text-sky-700 text-slate-700 hover:font-bold text-xs rounded-lg border border-slate-100 transition-all font-semibold cursor-pointer"
                                 >
                                   <span>📎</span>
-                                  <span>Google Drive Datei</span>
+                                  <span>{language === 'de' ? 'Google Drive Datei' : 'Google Drive file'}</span>
                                 </button>
 
                                 <button
@@ -1344,7 +1462,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                                   className="w-full flex items-center gap-2.5 px-3 py-2 text-left hover:bg-emerald-50 hover:text-emerald-700 text-slate-700 hover:font-bold text-xs rounded-lg border border-slate-100 transition-all font-semibold cursor-pointer"
                                 >
                                   <span>🖼️</span>
-                                  <span>Bild-URL einbinden</span>
+                                  <span>{language === 'de' ? 'Bild-URL einbinden' : 'Embed image URL'}</span>
                                 </button>
 
                                 <button
@@ -1355,7 +1473,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                                   className="w-full flex items-center gap-2.5 px-3 py-2 text-left hover:bg-amber-50 hover:text-amber-700 text-slate-700 hover:font-bold text-xs rounded-lg border border-slate-100 transition-all font-semibold cursor-pointer"
                                 >
                                   <span>🌐</span>
-                                  <span>Web-Link einpflegen</span>
+                                  <span>{language === 'de' ? 'Web-Link einpflegen' : 'Add web link'}</span>
                                 </button>
                               </div>
 
@@ -1364,7 +1482,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                                 onClick={() => setActivePopup(null)}
                                 className="w-full py-1 text-slate-400 hover:text-slate-650 font-bold text-xs uppercase cursor-pointer"
                               >
-                                Abbrechen
+                                {language === 'de' ? 'Abbrechen' : 'Cancel'}
                               </button>
                             </div>
                           )}
@@ -1372,8 +1490,12 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                           {activePopup.type === 'image-url' && (
                             <div className="flex flex-col h-full justify-between">
                               <div className="border-b border-slate-150 pb-2 flex justify-between items-center">
-                                <span className="text-xs font-extrabold text-slate-800">Bild-URL hinzufügen</span>
-                                <button type="button" onClick={() => setActivePopup({ noteId: note.id, type: 'attach' })} className="text-slate-400 hover:text-slate-600 text-xs">Zurück</button>
+                                <span className="text-xs font-extrabold text-slate-800">
+                                  {language === 'de' ? 'Bild-URL hinzufügen' : 'Add image URL'}
+                                </span>
+                                <button type="button" onClick={() => setActivePopup({ noteId: note.id, type: 'attach' })} className="text-slate-400 hover:text-slate-600 text-xs">
+                                  {language === 'de' ? 'Zurück' : 'Back'}
+                                </button>
                               </div>
 
                               <form 
@@ -1384,7 +1506,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                                   if (urlInput && urlInput.value.trim()) {
                                     handleAttachFile(note.id, {
                                       type: 'image',
-                                      title: 'Eingebundenes Bild',
+                                      title: language === 'de' ? 'Eingebundenes Bild' : 'Embedded image',
                                       url: urlInput.value.trim()
                                     });
                                     setActivePopup(null);
@@ -1405,13 +1527,13 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                                     onClick={() => setActivePopup({ noteId: note.id, type: 'attach' })}
                                     className="flex-1 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg cursor-pointer"
                                   >
-                                    Abbrechen
+                                    {language === 'de' ? 'Abbrechen' : 'Cancel'}
                                   </button>
                                   <button
                                     type="submit"
                                     className="flex-1 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg cursor-pointer"
                                   >
-                                    Hinzufügen
+                                    {language === 'de' ? 'Hinzufügen' : 'Add'}
                                   </button>
                                 </div>
                               </form>
@@ -1422,8 +1544,12 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                           {activePopup.type === 'link-url' && (
                             <div className="flex flex-col h-full justify-between">
                               <div className="border-b border-slate-150 pb-2 flex justify-between items-center">
-                                <span className="text-xs font-extrabold text-slate-800">Web-Link hinzufügen</span>
-                                <button type="button" onClick={() => setActivePopup({ noteId: note.id, type: 'attach' })} className="text-slate-400 hover:text-slate-600 text-xs">Zurück</button>
+                                <span className="text-xs font-extrabold text-slate-800">
+                                  {language === 'de' ? 'Web-Link hinzufügen' : 'Add web link'}
+                                </span>
+                                <button type="button" onClick={() => setActivePopup({ noteId: note.id, type: 'attach' })} className="text-slate-400 hover:text-slate-600 text-xs">
+                                  {language === 'de' ? 'Zurück' : 'Back'}
+                                </button>
                               </div>
 
                               <form 
@@ -1455,7 +1581,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                                 <input 
                                   name="linkTitle"
                                   type="text"
-                                  placeholder="Titel (z.B. Wikipedia)"
+                                  placeholder={language === 'de' ? 'Titel (z.B. Wikipedia)' : 'Title (e.g. Wikipedia)'}
                                   className="w-full bg-slate-50 border border-slate-200 rounded-lg text-xs font-semibold px-2 py-1 focus:outline-none focus:border-sky-500"
                                 />
                                 <div className="flex gap-2">
@@ -1464,13 +1590,13 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                                     onClick={() => setActivePopup({ noteId: note.id, type: 'attach' })}
                                     className="flex-1 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg cursor-pointer"
                                   >
-                                    Abbrechen
+                                    {language === 'de' ? 'Abbrechen' : 'Cancel'}
                                   </button>
                                   <button
                                     type="submit"
                                     className="flex-1 py-1.5 bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold rounded-lg cursor-pointer"
                                   >
-                                    Hinzufügen
+                                    {language === 'de' ? 'Hinzufügen' : 'Add'}
                                   </button>
                                 </div>
                               </form>
@@ -1493,9 +1619,13 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
             <div className="flex items-start gap-2.5 max-w-2xl">
               <span className="text-lg shrink-0">☁️</span>
               <div className="text-xs text-amber-900 font-medium font-sans">
-                <p className="font-bold text-amber-950">Echtzeit Google Drive-Synchronisierung</p>
+                <p className="font-bold text-amber-950">
+                  {language === 'de' ? 'Echtzeit Google Drive-Synchronisierung' : 'Real-time Google Drive Synchronization'}
+                </p>
                 <p className="opacity-90 leading-relaxed mt-1">
-                  Alle Änderungen an Haftnotizen, Farbcodes und Drag-Kombinationen werden automatisch in ein getrenntes, sicheres Datendokument in deinem Google-Konto hochgeladen. Dadurch rufen alle lizenzierten Geräte stets denselben Stand ab. Offline erstellte Notizen werden zusammengeführt, sobald du wieder eine Internetverbindung herstellst!
+                  {language === 'de'
+                    ? 'Alle Änderungen an Haftnotizen, Farbcodes und Drag-Kombinationen werden automatisch in ein getrenntes, sicheres Datendokument in deinem Google-Konto hochgeladen. Dadurch rufen alle lizenzierten Geräte stets denselben Stand ab. Offline erstellte Notizen werden zusammengeführt, sobald du wieder eine Internetverbindung herstellst!'
+                    : 'All changes to sticky notes, color codes, and drag reordering are automatically uploaded to a dedicated, secure data file in your Google account. All licensed devices stay in sync. Offline notes are merged once you reconnect to the internet!'}
                 </p>
               </div>
             </div>
@@ -1515,8 +1645,12 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                   <FolderOpen className="w-5 h-5 text-sky-600" />
                 </div>
                 <div>
-                  <h3 className="text-sm font-bold text-slate-800">Dateien aus Google Drive wählen</h3>
-                  <p className="text-[10px] text-slate-500 font-semibold align-middle">Wähle Dokumente, PDFs oder Präsentationen zum Anpinnen</p>
+                  <h3 className="text-sm font-bold text-slate-800">
+                    {language === 'de' ? 'Dateien aus Google Drive wählen' : 'Select files from Google Drive'}
+                  </h3>
+                  <p className="text-[10px] text-slate-500 font-semibold align-middle">
+                    {language === 'de' ? 'Wähle Dokumente, PDFs oder Präsentationen zum Anpinnen' : 'Choose documents, PDFs or presentations to pin'}
+                  </p>
                 </div>
               </div>
               <button 
@@ -1561,7 +1695,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
                 <input
                   type="text"
-                  placeholder="Dateien durchsuchen..."
+                  placeholder={language === 'de' ? 'Dateien durchsuchen...' : 'Search files...'}
                   value={pickerSearch}
                   onChange={(e) => setPickerSearch(e.target.value)}
                   className="w-full pl-9 pr-8 py-1.5 bg-slate-50 border border-slate-200 focus:border-sky-500 rounded-lg text-xs font-semibold focus:outline-none placeholder:text-slate-400 transition-colors"
@@ -1583,13 +1717,19 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
               {pickerLoading ? (
                 <div className="flex flex-col items-center justify-center h-full gap-3 py-12">
                   <Loader2 className="w-7 h-7 text-sky-500 animate-spin" />
-                  <p className="text-xs text-slate-400 font-semibold">Lade Google Drive Inhalte...</p>
+                  <p className="text-xs text-slate-400 font-semibold">
+                    {language === 'de' ? 'Lade Google Drive Inhalte...' : 'Loading Google Drive items...'}
+                  </p>
                 </div>
               ) : pickerFiles.length === 0 ? (
                 <div className="flex flex-col items-center justify-center h-full py-12 text-center text-slate-400">
                   <FolderOpen className="w-8 h-8 text-slate-350 mb-2" />
-                  <p className="text-xs font-semibold">Keine gängigen Dokumente hier vorhanden</p>
-                  <p className="text-[10px] opacity-80 mt-1 max-w-xs">Dieser Ordner ist leer oder Suchergebnisse blieben ohne Treffer.</p>
+                  <p className="text-xs font-semibold">
+                    {language === 'de' ? 'Keine gängigen Dokumente hier vorhanden' : 'No common documents found here'}
+                  </p>
+                  <p className="text-[10px] opacity-80 mt-1 max-w-xs">
+                    {language === 'de' ? 'Dieser Ordner ist leer oder Suchergebnisse blieben ohne Treffer.' : 'This folder is empty or no matching search results.'}
+                  </p>
                 </div>
               ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -1625,7 +1765,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                             {file.name}
                           </p>
                           <p className="text-[9px] font-mono font-semibold text-slate-400 mt-0.5">
-                            {isFolder ? 'Ordner' : file.mimeType?.split('.').pop()?.toUpperCase()}
+                            {isFolder ? (language === 'de' ? 'Ordner' : 'Folder') : file.mimeType?.split('.').pop()?.toUpperCase()}
                           </p>
                         </div>
                       </button>
@@ -1645,7 +1785,7 @@ export default function StickyNotes({ isCreationBlocked = false, onBlockedCreati
                 }}
                 className="px-4 py-2 bg-slate-200 hover:bg-slate-250 text-slate-700 text-xs font-bold rounded-lg cursor-pointer transition-colors"
               >
-                Schließen
+                {language === 'de' ? 'Schließen' : 'Close'}
               </button>
             </div>
           </div>

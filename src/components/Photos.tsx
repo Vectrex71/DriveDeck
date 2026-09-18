@@ -26,8 +26,14 @@ import {
   ExternalLink,
   Clock,
   MoreVertical,
-  ArrowUpDown
+  ArrowUpDown,
+  Plus,
+  Trash,
+  Upload,
+  Eye,
+  AlertTriangle
 } from 'lucide-react';
+import { useLanguage } from '../lib/LanguageContext';
 
 interface PhotosProps {
   token: string | null;
@@ -56,6 +62,29 @@ interface PhotoAlbum {
   subfolderCount?: number;
 }
 
+const isImageOrVideo = (mimeType?: string, name?: string): boolean => {
+  if (mimeType?.startsWith('image/') || mimeType?.startsWith('video/')) {
+    return true;
+  }
+  if (!name) return false;
+  const lower = name.toLowerCase();
+  return (
+    lower.endsWith('.jpg') ||
+    lower.endsWith('.jpeg') ||
+    lower.endsWith('.png') ||
+    lower.endsWith('.heic') ||
+    lower.endsWith('.heif') ||
+    lower.endsWith('.webp') ||
+    lower.endsWith('.gif') ||
+    lower.endsWith('.mp4') ||
+    lower.endsWith('.mov') ||
+    lower.endsWith('.m4v') ||
+    lower.endsWith('.webm') ||
+    lower.endsWith('.avi') ||
+    lower.endsWith('.mkv')
+  );
+};
+
 const fetchFolderPreviews = async (
   folderId: string, 
   currentToken: string, 
@@ -66,9 +95,9 @@ const fetchFolderPreviews = async (
   let photoCount = 0;
 
   try {
-    // 1. Fetch children of folderId (both subfolders and files)
+    // 1. Fetch children of folderId (both subfolders and files with name fallback)
     const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
-    const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,mimeType,thumbnailLink)&pageSize=100&orderBy=name`;
+    const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType,thumbnailLink)&pageSize=100&orderBy=name&supportsAllDrives=true&includeItemsFromAllDrives=true`;
     const res = await fetch(url, {
       headers: { Authorization: `Bearer ${currentToken}` }
     });
@@ -78,7 +107,7 @@ const fetchFolderPreviews = async (
     const files = data.files || [];
 
     const immediateFolders = files.filter((f: any) => f.mimeType === 'application/vnd.google-apps.folder');
-    const immediatePhotos = files.filter((f: any) => f.mimeType?.startsWith('image/') || f.mimeType?.startsWith('video/'));
+    const immediatePhotos = files.filter((f: any) => isImageOrVideo(f.mimeType, f.name));
 
     subfolderCount = immediateFolders.length;
     photoCount = immediatePhotos.length;
@@ -97,14 +126,14 @@ const fetchFolderPreviews = async (
         if (urls.length >= maxPreviews) break;
         try {
           const subQ = encodeURIComponent(`'${immediateFolders[i].id}' in parents and trashed = false`);
-          const subUrl = `https://www.googleapis.com/drive/v3/files?q=${subQ}&fields=files(id,mimeType,thumbnailLink)&pageSize=50&orderBy=name`;
+          const subUrl = `https://www.googleapis.com/drive/v3/files?q=${subQ}&fields=files(id,name,mimeType,thumbnailLink)&pageSize=50&orderBy=name&supportsAllDrives=true&includeItemsFromAllDrives=true`;
           const subRes = await fetch(subUrl, {
             headers: { Authorization: `Bearer ${currentToken}` }
           });
           if (subRes.ok) {
             const subData = await subRes.json();
             const subFiles = subData.files || [];
-            const subPhotos = subFiles.filter((f: any) => f.mimeType?.startsWith('image/') || f.mimeType?.startsWith('video/'));
+            const subPhotos = subFiles.filter((f: any) => isImageOrVideo(f.mimeType, f.name));
             
             subPhotos.forEach((file: any) => {
               if (file.thumbnailLink && urls.length < maxPreviews) {
@@ -293,20 +322,50 @@ export default function Photos({ token, onConnectDrive, showConfirm }: PhotosPro
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Hidden items (only display-removed from DriveDeck)
+  const [hiddenItemIds, setHiddenItemIds] = useState<string[]>(() => {
+    try {
+      const cached = localStorage.getItem('drivedeck_photos_hidden_items');
+      return cached ? JSON.parse(cached) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const [deleteChoiceItem, setDeleteChoiceItem] = useState<{
+    id: string;
+    name: string;
+    isFolder: boolean;
+  } | null>(null);
+
+  const [deletingLoading, setDeletingLoading] = useState(false);
+
+  const hideItemLocally = (id: string, isFolder: boolean) => {
+    setHiddenItemIds(prev => {
+      const updated = [...prev, id];
+      localStorage.setItem('drivedeck_photos_hidden_items', JSON.stringify(updated));
+      return updated;
+    });
+  };
+
   // Stable sorted arrays
   const displayedSubfolders = React.useMemo(() => {
-    return [...subfolders].sort((a, b) => {
-      const comp = a.name.localeCompare(b.name, 'de', { numeric: true, sensitivity: 'base' });
-      return sortDirection === 'asc' ? comp : -comp;
-    });
-  }, [subfolders, sortDirection]);
+    return [...subfolders]
+      .filter(f => !hiddenItemIds.includes(f.id))
+      .sort((a, b) => {
+        const comp = a.name.localeCompare(b.name, 'de', { numeric: true, sensitivity: 'base' });
+        return sortDirection === 'asc' ? comp : -comp;
+      });
+  }, [subfolders, sortDirection, hiddenItemIds]);
 
   const displayedPhotos = React.useMemo(() => {
-    return [...albumPhotos].sort((a, b) => {
-      const comp = a.name.localeCompare(b.name, 'de', { numeric: true, sensitivity: 'base' });
-      return sortDirection === 'asc' ? comp : -comp;
-    });
-  }, [albumPhotos, sortDirection]);
+    return [...albumPhotos]
+      .filter(p => !hiddenItemIds.includes(p.id))
+      .sort((a, b) => {
+        const comp = a.name.localeCompare(b.name, 'de', { numeric: true, sensitivity: 'base' });
+        return sortDirection === 'asc' ? comp : -comp;
+      });
+  }, [albumPhotos, sortDirection, hiddenItemIds]);
 
   // Configuration modal / Folder Selector
   const [showConfig, setShowConfig] = useState(false);
@@ -322,6 +381,177 @@ export default function Photos({ token, onConnectDrive, showConfirm }: PhotosPro
   const [loadingLightbox, setLoadingLightbox] = useState(false);
 
   const currentFolder = folderPath[folderPath.length - 1] ?? null;
+
+  const { language } = useLanguage();
+  const [newAlbumName, setNewAlbumName] = useState('');
+  const [showNewAlbumModal, setShowNewAlbumModal] = useState(false);
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [uploadingFiles, setUploadingFiles] = useState<{ name: string; progress: number }[]>([]);
+  const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+  const handleCreateAlbum = async () => {
+    if (!newAlbumName.trim() || !token || !currentFolder) return;
+    setCreatingFolder(true);
+    try {
+      const parentId = currentFolder.id;
+      const response = await fetch('https://www.googleapis.com/drive/v3/files', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          name: newAlbumName.trim(),
+          mimeType: 'application/vnd.google-apps.folder',
+          parents: [parentId]
+        })
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Album-Erstellung fehlgeschlagen: ${response.statusText}`);
+      }
+      
+      const newFolder = await response.json();
+      setNewAlbumName('');
+      setShowNewAlbumModal(false);
+      
+      // Refresh content
+      await loadFolderContents(parentId);
+    } catch (err: any) {
+      alert(`Fehler beim Erstellen des Albums: ${err.message || err}`);
+    } finally {
+      setCreatingFolder(false);
+    }
+  };
+
+  const handleUploadFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0 || !token || !currentFolder) return;
+    
+    const parentId = currentFolder.id;
+    const newUploads = Array.from(files).map(f => ({ name: f.name, progress: 0 }));
+    setUploadingFiles(prev => [...prev, ...newUploads]);
+    
+    // Process files sequentially
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      try {
+        const updateProgress = (progress: number) => {
+          setUploadingFiles(prev => 
+            prev.map(item => item.name === file.name ? { ...item, progress } : item)
+          );
+        };
+        
+        updateProgress(15);
+        
+        const metadata = {
+          name: file.name,
+          mimeType: file.type,
+          parents: [parentId]
+        };
+
+        const boundary = '314159265358979323846';
+        const delimiter = `\r\n--${boundary}\r\n`;
+        const closeDelimiter = `\r\n--${boundary}--`;
+
+        updateProgress(35);
+
+        const reader = new FileReader();
+        const fileData = await new Promise<ArrayBuffer>((resolve, reject) => {
+          reader.onload = () => resolve(reader.result as ArrayBuffer);
+          reader.onerror = reject;
+          reader.readAsArrayBuffer(file);
+        });
+
+        updateProgress(60);
+
+        const metadataPart = `Content-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n`;
+        
+        const headerBlob = new Blob([
+          delimiter,
+          metadataPart,
+          delimiter,
+          `Content-Type: ${file.type}\r\n\r\n`
+        ]);
+        const footerBlob = new Blob([closeDelimiter]);
+        const bodyBlob = new Blob([headerBlob, fileData, footerBlob]);
+
+        updateProgress(80);
+
+        const response = await fetch(
+          'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id',
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': `multipart/related; boundary=${boundary}`,
+            },
+            body: bodyBlob,
+          }
+        );
+
+        if (!response.ok) {
+          throw new Error(`Upload failed for ${file.name}`);
+        }
+        
+        updateProgress(100);
+      } catch (err: any) {
+        console.error(err);
+        setUploadingFiles(prev => 
+          prev.map(item => item.name === file.name ? { ...item, progress: -1 } : item)
+        );
+      } finally {
+        // Clear uploaded list item after brief delay
+        const currentFileName = file.name;
+        setTimeout(() => {
+          setUploadingFiles(prev => prev.filter(item => item.name !== currentFileName));
+        }, 1500);
+      }
+    }
+    
+    // Refresh contents
+    await loadFolderContents(parentId);
+  };
+
+  const handleDeleteItem = (itemId: string, itemName: string, isFolder: boolean) => {
+    setDeleteChoiceItem({ id: itemId, name: itemName, isFolder });
+  };
+
+  const handleConfirmHide = () => {
+    if (!deleteChoiceItem) return;
+    const { id, isFolder } = deleteChoiceItem;
+    hideItemLocally(id, isFolder);
+    setDeleteChoiceItem(null);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deleteChoiceItem || !token) return;
+    const { id, isFolder } = deleteChoiceItem;
+    setDeletingLoading(true);
+    try {
+      const response = await fetch(`https://www.googleapis.com/drive/v3/files/${id}?supportsAllDrives=true`, {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+      if (!response.ok) {
+        throw new Error(`Google Drive API-Fehler: ${response.status} ${response.statusText}`);
+      }
+      
+      // Update state
+      if (isFolder) {
+        setSubfolders(prev => prev.filter(s => s.id !== id));
+      } else {
+        setAlbumPhotos(prev => prev.filter(p => p.id !== id));
+      }
+      setDeleteChoiceItem(null);
+    } catch (err: any) {
+      alert(language === 'de' ? `Fehler beim Löschen auf Google Drive: ${err.message || err}` : `Error deleting from Google Drive: ${err.message || err}`);
+    } finally {
+      setDeletingLoading(false);
+    }
+  };
 
   // Save parent folder selection to localStorage
   const handleSelectParentFolder = (id: string, name: string) => {
@@ -354,7 +584,7 @@ export default function Photos({ token, onConnectDrive, showConfirm }: PhotosPro
         queryList.push(`name contains '${sanitized}'`);
       }
       const q = encodeURIComponent(queryList.join(' and '));
-      const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&pageSize=15&orderBy=name`;
+      const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&pageSize=15&orderBy=name&supportsAllDrives=true&includeItemsFromAllDrives=true`;
       
       const res = await fetch(url, {
         headers: { Authorization: `Bearer ${token}` }
@@ -376,7 +606,7 @@ export default function Photos({ token, onConnectDrive, showConfirm }: PhotosPro
     if (!customFolderId.trim() || !token) return;
     setSearchingFolders(true);
     try {
-      const url = `https://www.googleapis.com/drive/v3/files/${customFolderId.trim()}?fields=id,name,mimeType`;
+      const url = `https://www.googleapis.com/drive/v3/files/${customFolderId.trim()}?fields=id,name,mimeType&supportsAllDrives=true`;
       const res = await fetch(url, {
         headers: { Authorization: `Bearer ${token}` }
       });
@@ -409,11 +639,11 @@ export default function Photos({ token, onConnectDrive, showConfirm }: PhotosPro
     try {
       // 1. Fetch subfolders
       const qFolders = encodeURIComponent(`'${folderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`);
-      const foldersUrl = `https://www.googleapis.com/drive/v3/files?q=${qFolders}&fields=files(id,name,createdTime)&pageSize=100&orderBy=name`;
+      const foldersUrl = `https://www.googleapis.com/drive/v3/files?q=${qFolders}&fields=files(id,name,createdTime)&pageSize=100&orderBy=name&supportsAllDrives=true&includeItemsFromAllDrives=true`;
 
       // 2. Fetch image/video files
       const qFiles = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
-      const filesUrl = `https://www.googleapis.com/drive/v3/files?q=${qFiles}&fields=files(id,name,mimeType,size,thumbnailLink)&pageSize=1000&orderBy=name`;
+      const filesUrl = `https://www.googleapis.com/drive/v3/files?q=${qFiles}&fields=files(id,name,mimeType,size,thumbnailLink)&pageSize=1000&orderBy=name&supportsAllDrives=true&includeItemsFromAllDrives=true`;
 
       const [resFolders, resFiles] = await Promise.all([
         fetch(foldersUrl, { headers: { Authorization: `Bearer ${token}` } }),
@@ -437,7 +667,7 @@ export default function Photos({ token, onConnectDrive, showConfirm }: PhotosPro
 
       const rawFiles = dataFiles.files || [];
       const loadedPhotos = rawFiles.filter((f: any) => 
-        f.mimeType?.startsWith('image/') || f.mimeType?.startsWith('video/')
+        isImageOrVideo(f.mimeType, f.name)
       );
 
       setSubfolders(loadedSubfolders);
@@ -486,7 +716,7 @@ export default function Photos({ token, onConnectDrive, showConfirm }: PhotosPro
       setLightboxVideoUrl(null);
       try {
         const response = await fetch(
-          `https://www.googleapis.com/drive/v3/files/${activeFile.id}?alt=media`,
+          `https://www.googleapis.com/drive/v3/files/${activeFile.id}?alt=media&supportsAllDrives=true`,
           { headers: { Authorization: `Bearer ${token}` } }
         );
 
@@ -660,6 +890,20 @@ export default function Photos({ token, onConnectDrive, showConfirm }: PhotosPro
                 </div>
                 
                 <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+                  {hiddenItemIds.length > 0 && (
+                    <button
+                      onClick={() => {
+                        setHiddenItemIds([]);
+                        localStorage.removeItem('drivedeck_photos_hidden_items');
+                      }}
+                      className="px-3 py-2 text-[10px] font-black text-slate-500 hover:text-sky-600 hover:bg-sky-50 border border-slate-200/50 hover:border-sky-200 rounded-xl cursor-pointer transition-all shrink-0 flex items-center gap-1 bg-white shadow-3xs animate-in fade-in"
+                      title={language === 'de' ? 'Alle ausgeblendeten Alben und Fotos wieder einblenden' : 'Restore all hidden albums and photos'}
+                    >
+                      <Eye className="w-3.5 h-3.5 text-sky-500 shrink-0" />
+                      <span>{language === 'de' ? `Einblenden (${hiddenItemIds.length})` : `Restore (${hiddenItemIds.length})`}</span>
+                    </button>
+                  )}
+                  
                   {/* Robust Up/Down sorting toggler */}
                   <div className="flex items-center bg-slate-50 border border-slate-200/60 rounded-xl p-0.5 shadow-3xs">
                     <button
@@ -700,6 +944,112 @@ export default function Photos({ token, onConnectDrive, showConfirm }: PhotosPro
                 </div>
               </div>
             )}
+
+            {/* Google Drive drive.file Privacy Information Banner */}
+            <div className="mb-6 p-4 bg-sky-50 border border-sky-100/80 rounded-2xl text-slate-750 flex flex-col sm:flex-row items-start gap-3 shadow-3xs animate-in fade-in duration-200">
+              <Sparkles className="w-5.5 h-5.5 text-sky-600 shrink-0 mt-0.5" />
+              <div className="text-xs leading-relaxed">
+                <p className="font-bold text-sky-800 mb-0.5">
+                  {language === 'de' ? '💡 Fotos-Synchronisation & Privatsphäre' : '💡 Photo Sync & Privacy'}
+                </p>
+                <p className="text-slate-600">
+                  {language === 'de' 
+                    ? 'Aufgrund der strengen Google-Sicherheitsregeln darf DriveDeck nur auf Alben und Bilddateien zugreifen, die direkt über diese App hochgeladen oder erstellt werden. Erstelle hier ein neues Album und ziehe deine Fotos direkt per Drag & Drop hinein – deine Daten liegen zu 100% sicher in deinem privaten Google Drive!'
+                    : 'Due to Google\'s strict privacy guidelines (drive.file scope), DriveDeck can only access albums and images created or uploaded directly within this app. Create an album here and drag your photos in – they are instantly stored securely in your personal Google Drive!'}
+                </p>
+              </div>
+            </div>
+
+            {/* Sub-actions Panel: Create Album & Upload files */}
+            <div 
+              onDragOver={(e) => {
+                e.preventDefault();
+                setIsDragging(true);
+              }}
+              onDragLeave={() => setIsDragging(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setIsDragging(false);
+                handleUploadFiles(e.dataTransfer.files);
+              }}
+              className={`mb-6 bg-white border rounded-2xl p-5 shadow-3xs transition-all duration-250 ${
+                isDragging 
+                  ? 'border-dashed border-sky-500 bg-sky-50/20 scale-[1.01] shadow-xs' 
+                  : 'border-slate-200/80'
+              }`}
+            >
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <h4 className="text-xs font-black text-slate-800 uppercase tracking-wider">
+                    {language === 'de' ? 'Cloud-Medien verwalten' : 'Manage Cloud Media'}
+                  </h4>
+                  <p className="text-[11px] text-slate-400">
+                    {language === 'de'
+                      ? 'Erstelle Alben oder lade Bild- & Videodateien per Klick oder Drag & Drop direkt hoch.'
+                      : 'Create albums or upload images and videos directly via click or drag & drop.'}
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2.5 flex-wrap">
+                  <button
+                    onClick={() => setShowNewAlbumModal(true)}
+                    className="flex items-center gap-1.5 px-3.5 py-2.5 bg-slate-150 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl cursor-pointer transition-all shadow-3xs"
+                  >
+                    <Plus className="w-3.5 h-3.5 text-sky-600 stroke-[2.5]" />
+                    <span>{language === 'de' ? 'Neues Album' : 'New Album'}</span>
+                  </button>
+
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="flex items-center gap-1.5 px-3.5 py-2.5 bg-sky-50 hover:bg-sky-100 text-sky-700 text-xs font-bold rounded-xl cursor-pointer transition-all border border-sky-100 shadow-3xs"
+                    title={language === 'de' ? 'Bilder oder Videos hochladen' : 'Upload photos or videos'}
+                  >
+                    <Upload className="w-3.5 h-3.5 text-sky-600 stroke-[2.2]" />
+                    <span>{language === 'de' ? 'Fotos hochladen' : 'Upload Photos'}</span>
+                  </button>
+                  <input
+                    type="file"
+                    ref={fileInputRef}
+                    multiple
+                    accept="image/*,video/*"
+                    onChange={(e) => handleUploadFiles(e.target.files)}
+                    className="hidden"
+                  />
+                </div>
+              </div>
+
+              {/* Upload Queue Progress Visualizers */}
+              {uploadingFiles.length > 0 && (
+                <div className="mt-4 border-t border-slate-100 pt-4 space-y-2 max-w-md animate-in fade-in slide-in-from-top-1.5 duration-150">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5 font-mono">
+                    <RefreshCw className="w-3 h-3 text-sky-600 animate-spin" />
+                    <span>{language === 'de' ? 'Wird hochgeladen...' : 'Uploading files...'}</span>
+                  </p>
+                  <div className="space-y-1.5">
+                    {uploadingFiles.map((up, i) => (
+                      <div key={i} className="text-[11px] bg-slate-50 border border-slate-200/50 rounded-lg p-2 flex items-center justify-between gap-3">
+                        <span className="font-medium text-slate-655 truncate max-w-[200px] font-mono">{up.name}</span>
+                        <div className="flex items-center gap-2 shrink-0">
+                          {up.progress === -1 ? (
+                            <span className="text-red-500 font-bold text-[10px]">{language === 'de' ? 'Fehler' : 'Failed'}</span>
+                          ) : (
+                            <>
+                              <div className="w-24 bg-slate-200 rounded-full h-1.5 overflow-hidden">
+                                <div 
+                                  className="bg-sky-500 h-1.5 rounded-full transition-all duration-300"
+                                  style={{ width: `${up.progress}%` }}
+                                />
+                              </div>
+                              <span className="text-slate-400 font-mono text-[9px] w-8 text-right">{up.progress}%</span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
 
             {/* Loading Indicator */}
             {loading ? (
@@ -766,12 +1116,24 @@ export default function Photos({ token, onConnectDrive, showConfirm }: PhotosPro
                           onClick={() => {
                             setFolderPath(prev => [...prev, { id: folder.id, name: folder.name }]);
                           }}
-                          className="bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-3xs hover:shadow-xs transition-all cursor-pointer group flex flex-col justify-between"
+                          className="bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-3xs hover:shadow-xs transition-all cursor-pointer group flex flex-col justify-between relative"
                         >
                           <div className="aspect-square bg-slate-50 relative overflow-hidden flex items-center justify-center border-b border-slate-100 shrink-0">
                             {renderFolderCover(folder)}
                             <div className="absolute inset-0 bg-gradient-to-t from-slate-900/10 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
                           </div>
+                          
+                          {/* Hover Delete button for Album */}
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteItem(folder.id, folder.name, true);
+                            }}
+                            className="absolute top-2.5 right-2.5 p-1.5 bg-white/95 hover:bg-rose-50 rounded-xl text-slate-400 hover:text-rose-650 transition-all opacity-0 group-hover:opacity-100 shadow-sm z-10 cursor-pointer border border-slate-100"
+                            title={language === 'de' ? 'Dieses Album dauerhaft löschen' : 'Delete this album permanently'}
+                          >
+                            <Trash className="w-3.5 h-3.5" />
+                          </button>
                           
                           <div className="p-4 bg-white flex-1 flex flex-col justify-between gap-1">
                             <h4 className="font-extrabold text-slate-800 text-xs truncate leading-tight group-hover:text-sky-600 transition-colors">
@@ -829,6 +1191,18 @@ export default function Photos({ token, onConnectDrive, showConfirm }: PhotosPro
                             onClick={() => setLightboxIndex(idx)}
                             className="break-inside-avoid relative bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-3xs cursor-pointer group hover:border-slate-350 hover:shadow-xs transition-all duration-200"
                           >
+                            {/* Hover Delete button for Photo */}
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteItem(file.id, file.name, false);
+                              }}
+                              className="absolute top-2.5 left-2.5 p-1.5 bg-white/95 hover:bg-rose-50 rounded-xl text-slate-400 hover:text-rose-650 transition-all opacity-0 group-hover:opacity-100 shadow-sm z-10 cursor-pointer border border-slate-100"
+                              title={language === 'de' ? 'Dieses Foto dauerhaft löschen' : 'Delete this photo permanently'}
+                            >
+                              <Trash className="w-3.5 h-3.5" />
+                            </button>
+
                             {previewUrl ? (
                               <div className="relative">
                                 <img 
@@ -874,6 +1248,189 @@ export default function Photos({ token, onConnectDrive, showConfirm }: PhotosPro
           </div>
         )}
       </div>
+
+      {/* Choice Modal: Nur ausblenden vs. Wirklich löschen */}
+      <AnimatePresence>
+        {deleteChoiceItem && (
+          <div className="fixed inset-0 z-55 flex items-center justify-center p-4 bg-slate-950/40 backdrop-blur-xs">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-2xl border border-slate-200 shadow-xl overflow-hidden w-full max-w-md flex flex-col animate-in"
+            >
+              {/* Modal Header */}
+              <div className="p-4 border-b border-slate-150 flex items-center justify-between bg-slate-50">
+                <div className="flex items-center space-x-2">
+                  <Trash className="w-5 h-5 text-rose-600" />
+                  <h3 className="font-extrabold text-slate-800 text-sm">
+                    {language === 'de' 
+                      ? (deleteChoiceItem.isFolder ? 'Album entfernen' : 'Foto entfernen') 
+                      : (deleteChoiceItem.isFolder ? 'Remove Album' : 'Remove Photo')}
+                  </h3>
+                </div>
+                <button
+                  onClick={() => setDeleteChoiceItem(null)}
+                  className="p-1 hover:bg-slate-250/60 rounded text-slate-500 hover:text-slate-800 cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Modal Body */}
+              <div className="p-5 space-y-4">
+                <p className="text-xs text-slate-600 leading-relaxed font-semibold">
+                  {language === 'de' 
+                    ? `Wie möchtest du das Element „${deleteChoiceItem.name}“ entfernen?` 
+                    : `How would you like to remove the item "${deleteChoiceItem.name}"?`}
+                </p>
+
+                {/* Choices */}
+                <div className="grid grid-cols-1 gap-3">
+                  {/* Option 1: Hide internally only */}
+                  <button
+                    type="button"
+                    onClick={handleConfirmHide}
+                    className="p-3.5 text-left bg-sky-50/40 hover:bg-sky-50 border border-sky-100 hover:border-sky-300 rounded-xl cursor-pointer group transition-all flex items-start gap-3 w-full"
+                  >
+                    <div className="p-1.5 bg-sky-100 rounded-lg text-sky-600 group-hover:bg-sky-200 shrink-0 mt-0.5">
+                      <Eye className="w-4 h-4" />
+                    </div>
+                    <div className="space-y-0.5 text-left">
+                      <h4 className="font-black text-xs text-sky-900">
+                        {language === 'de' ? 'Nur aus DriveDeck ausblenden (Empfohlen)' : 'Hide from DriveDeck only (Recommended)'}
+                      </h4>
+                      <p className="text-[11px] text-sky-750 font-medium leading-normal">
+                        {language === 'de' 
+                          ? 'Das Element bleibt vollständig sicher und unberührt auf deinem Google Drive. Es wird nur in dieser App nicht mehr angezeigt.' 
+                          : 'The item remains 100% safe and untouched on your Google Drive. It will simply no longer be visible within this app.'}
+                      </p>
+                    </div>
+                  </button>
+
+                  {/* Option 2: Delete from Google Drive */}
+                  <button
+                    type="button"
+                    disabled={deletingLoading}
+                    onClick={handleConfirmDelete}
+                    className="p-3.5 text-left bg-rose-50/10 hover:bg-rose-50/40 border border-rose-100/50 hover:border-rose-250 rounded-xl cursor-pointer group transition-all flex items-start gap-3 disabled:opacity-50 w-full"
+                  >
+                    <div className="p-1.5 bg-rose-50 rounded-lg text-rose-600 group-hover:bg-rose-105 shrink-0 mt-0.5 font-sans">
+                      {deletingLoading ? (
+                        <RefreshCw className="w-4 h-4 animate-spin text-rose-600" />
+                      ) : (
+                        <AlertTriangle className="w-4 h-4" />
+                      )}
+                    </div>
+                    <div className="space-y-0.5 text-left">
+                      <h4 className="font-black text-xs text-rose-900 flex items-center gap-1.5">
+                        <span>{language === 'de' ? 'Dauerhaft von Google Drive löschen' : 'Permanently delete from Google Drive'}</span>
+                      </h4>
+                      <p className="text-[11px] text-rose-750 font-medium leading-normal">
+                        {language === 'de' 
+                          ? '⚠️ Achtung: Das Element wird unwiderruflich und endgültig aus deiner Google Drive Cloud gelöscht! Dies kann nicht rückgängig gemacht werden.' 
+                          : '⚠️ Warning: This will permanently and irreversibly delete the item from your actual Google Drive storage cloud! This action cannot be undone.'}
+                      </p>
+                    </div>
+                  </button>
+                </div>
+              </div>
+
+              {/* Modal Footer */}
+              <div className="p-3 bg-slate-50 border-t border-slate-150 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDeleteChoiceItem(null)}
+                  className="px-4 py-2 hover:bg-slate-200 text-slate-650 text-xs font-bold rounded-lg cursor-pointer transition-colors"
+                >
+                  {language === 'de' ? 'Abbrechen' : 'Cancel'}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* 5. Neues Album Erstellen Modal */}
+      <AnimatePresence>
+        {showNewAlbumModal && (
+          <div className="fixed inset-0 z-55 flex items-center justify-center p-4 bg-slate-950/40 backdrop-blur-xs">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-2xl border border-slate-200 shadow-xl overflow-hidden w-full max-w-sm flex flex-col animate-in"
+            >
+              {/* Modal Header */}
+              <div className="p-4 border-b border-slate-150 flex items-center justify-between bg-slate-50">
+                <div className="flex items-center space-x-2">
+                  <Folder className="w-5 h-5 text-sky-650" />
+                  <h3 className="font-extrabold text-slate-800 text-sm">
+                    {language === 'de' ? 'Neues Fotoalbum erstellen' : 'Create New Photo Album'}
+                  </h3>
+                </div>
+                <button
+                  onClick={() => setShowNewAlbumModal(false)}
+                  className="p-1 hover:bg-slate-250/60 rounded text-slate-500 hover:text-slate-800 cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Modal Body */}
+              <div className="p-5 space-y-4">
+                <div className="space-y-1.5">
+                  <label className="block text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                    {language === 'de' ? 'Name des Albums' : 'Album Name'}
+                  </label>
+                  <input
+                    type="text"
+                    placeholder={language === 'de' ? 'z.B. Sommerurlaub 2026' : 'e.g., Summer Holiday 2026'}
+                    value={newAlbumName}
+                    onChange={(e) => setNewAlbumName(e.target.value)}
+                    className="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 font-bold"
+                    autoFocus
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && newAlbumName.trim() && !creatingFolder) {
+                        handleCreateAlbum();
+                      }
+                    }}
+                  />
+                  <p className="text-[10px] text-slate-400 leading-normal pt-1">
+                    {language === 'de' 
+                      ? 'Es wird ein neuer Unterordner in deinem verknüpften Fotos-Hauptordner auf Google Drive angelegt.' 
+                      : 'This creates a new subfolder in your linked main Photos folder on Google Drive.'}
+                  </p>
+                </div>
+              </div>
+
+              {/* Modal Footer */}
+              <div className="p-3 bg-slate-50 border-t border-slate-150 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowNewAlbumModal(false)}
+                  className="px-4 py-2 hover:bg-slate-200 text-slate-650 text-xs font-bold rounded-lg cursor-pointer transition-colors"
+                >
+                  {language === 'de' ? 'Abbrechen' : 'Cancel'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCreateAlbum}
+                  disabled={!newAlbumName.trim() || creatingFolder}
+                  className="px-4 py-2 bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white text-xs font-bold rounded-lg cursor-pointer shadow-3xs transition-colors flex items-center gap-1.5"
+                >
+                  {creatingFolder ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Plus className="w-3.5 h-3.5" />
+                  )}
+                  <span>{language === 'de' ? 'Album erstellen' : 'Create Album'}</span>
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* 3. Choose Custom Google Drive Directory Modal */}
       <AnimatePresence>

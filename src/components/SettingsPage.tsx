@@ -1,22 +1,34 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import React, { useState } from 'react';
 import { 
   User, 
   Settings, 
   Cloud, 
   CloudOff, 
-  CreditCard, 
   Check, 
   Sparkles, 
-  AlertTriangle, 
-  ArrowRight,
   Shield,
   HelpCircle,
   ExternalLink,
   Info,
   Database,
-  Download
+  Download,
+  Bell,
+  Volume2,
+  VolumeX
 } from 'lucide-react';
 import { getAllPages } from '../lib/db';
+import { useLanguage } from '../lib/LanguageContext';
+import { 
+  getNotificationPermission, 
+  requestNotificationPermission, 
+  playNotificationSound, 
+  showSystemNotification 
+} from '../lib/notificationService';
 
 interface SettingsPageProps {
   user: any;
@@ -24,10 +36,6 @@ interface SettingsPageProps {
   syncStatus: 'offline' | 'syncing' | 'synced' | 'error';
   onConnectDrive: (method?: 'popup' | 'redirect') => Promise<void>;
   onDisconnectDrive: () => Promise<void>;
-  isPremium: boolean;
-  onResetPremium: () => void;
-  trialDaysLeft: number | null;
-  isTrialExpired: boolean;
 }
 
 export default function SettingsPage({
@@ -36,15 +44,40 @@ export default function SettingsPage({
   syncStatus,
   onConnectDrive,
   onDisconnectDrive,
-  isPremium,
-  onResetPremium,
-  trialDaysLeft,
-  isTrialExpired,
 }: SettingsPageProps) {
-  const [stripeLoading, setStripeLoading] = useState(false);
-  const [stripeError, setStripeError] = useState<string | null>(null);
-  const [selectedPlan, setSelectedPlan] = useState<'monthly' | 'yearly' | 'lifetime'>('monthly');
+  const { language, setLanguage, t } = useLanguage();
   const [isExporting, setIsExporting] = useState(false);
+  const [notificationPerm, setNotificationPerm] = useState<string>(() => getNotificationPermission());
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
+    return localStorage.getItem('drivedeck_tasks_sound') !== 'false';
+  });
+  const [testSent, setTestSent] = useState(false);
+
+  const handleRequestPush = async () => {
+    const res = await requestNotificationPermission();
+    setNotificationPerm(res);
+  };
+
+  const handleSendTestNotification = () => {
+    playNotificationSound();
+    showSystemNotification(
+      language === 'de' ? '🔔 DriveDeck Test-Erinnerung' : '🔔 DriveDeck Test Reminder',
+      {
+        body: language === 'de' 
+          ? 'Super! Push-Benachrichtigungen für Aufgaben & Kanban funktionieren einwandfrei.'
+          : 'Great! Push notifications for Tasks & Kanban are working smoothly.'
+      }
+    );
+    setTestSent(true);
+    setTimeout(() => setTestSent(false), 3000);
+  };
+
+  const handleToggleSound = () => {
+    const next = !soundEnabled;
+    setSoundEnabled(next);
+    localStorage.setItem('drivedeck_tasks_sound', String(next));
+    if (next) playNotificationSound();
+  };
 
   const handleExportData = async () => {
     setIsExporting(true);
@@ -84,55 +117,26 @@ export default function SettingsPage({
       downloadAnchor.remove();
     } catch (error) {
       console.error('Backup failed:', error);
-      alert('Backup fehlgeschlagen: ' + error);
+      alert(language === 'de' ? 'Backup fehlgeschlagen: ' + error : 'Backup failed: ' + error);
     } finally {
       setIsExporting(false);
     }
   };
 
-  const handleStripeCheckout = async () => {
-    setStripeLoading(true);
-    setStripeError(null);
-    try {
-      const response = await fetch('/api/stripe/create-checkout-session', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          plan: selectedPlan,
-          email: user?.email || '',
-        }),
-      });
-
-      const data = await response.json();
-      if (!response.ok || data.error) {
-        throw new Error(data.error || 'Fehler beim Erstellen der Stripe Checkout-Sitzung.');
-      }
-
-      if (data.url) {
-        window.location.href = data.url;
-      } else {
-        throw new Error('Keine Checkout-URL vom Server erhalten.');
-      }
-    } catch (error: any) {
-      console.error('[Stripe Client Error]:', error);
-      setStripeError(error?.message || 'Verbindung mit Stripe fehlgeschlagen.');
-    } finally {
-      setStripeLoading(false);
-    }
-  };
-
   return (
-    <div className="max-w-4xl mx-auto px-4 py-8 font-sans animate-in fade-in duration-300">
+    <div className="max-w-4xl mx-auto px-4 py-8 font-sans animate-in fade-in duration-300 text-left">
       {/* Page Header */}
       <div className="flex items-center space-x-3 mb-8 pb-4 border-b border-slate-100">
         <div className="p-2 bg-sky-500/10 rounded-lg text-[#0288D1]">
           <Settings className="w-6 h-6" />
         </div>
         <div>
-          <h1 className="text-xl font-bold text-slate-800 tracking-tight">Profil &amp; Einstellungen</h1>
-          <p className="text-xs text-notion-secondary font-medium">Verwalte dein Konto, die Google Drive-Verbindung und Premium-Dienste</p>
+          <h1 className="text-xl font-bold text-slate-800 tracking-tight">
+            {language === 'de' ? 'Profil & Einstellungen' : 'Profile & Settings'}
+          </h1>
+          <p className="text-xs text-slate-450 font-medium">
+            {language === 'de' ? 'Verwalte dein Konto, die Google Drive-Verbindung und deine Einstellungen' : 'Configure your account, cloud drive sync, and workspace settings'}
+          </p>
         </div>
       </div>
 
@@ -140,7 +144,9 @@ export default function SettingsPage({
         {/* Left Column: Quick Profile Info */}
         <div className="md:col-span-1 space-y-4">
           <div className="bg-white border border-slate-200/60 rounded-xl p-5 shadow-xs">
-            <h2 className="text-xs font-extrabold text-slate-400 uppercase tracking-wider mb-4">Mein Profil</h2>
+            <h2 className="text-xs font-extrabold text-slate-400 uppercase tracking-wider mb-4">
+              {language === 'de' ? 'Mein Profil' : 'My Account'}
+            </h2>
             <div className="flex flex-col items-center text-center">
               <div className="relative w-16 h-16 rounded-full bg-slate-100 border border-slate-200 flex items-center justify-center mb-3 overflow-hidden shadow-2xs">
                 {user?.photoURL ? (
@@ -154,53 +160,99 @@ export default function SettingsPage({
                   <User className="w-8 h-8 text-slate-400" />
                 )}
                 {token && (
-                  <span className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-emerald-50 border-2 border-white rounded-full" title="Mit Google verbunden" />
+                  <span className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-emerald-500 border border-white rounded-full" title="Connected to Google" />
                 )}
               </div>
               
               <span className="font-bold text-slate-800 text-sm max-w-full truncate">
-                {user?.displayName || 'DriveDeck Nutzer'}
+                {user?.displayName || (language === 'de' ? 'DriveDeck Nutzer' : 'DriveDeck Master')}
               </span>
-              <span className="text-xs text-slate-400 mb-4 max-w-full truncate">
+              <span className="text-xs text-slate-450 mb-2 max-w-full truncate">
                 {user?.email || 'lokaler_modus@drivedeck.internal'}
+              </span>
+
+              <span className="inline-flex items-center gap-1 mb-3 px-2.5 py-0.5 bg-emerald-50 text-emerald-800 border border-emerald-250 text-[10px] font-black rounded-full uppercase tracking-wider shadow-3xs">
+                ✨ {language === 'de' ? '100% Kostenlos' : '100% Free'}
               </span>
 
               <div className="w-full pt-3.5 border-t border-slate-100 text-left space-y-2">
                 <div className="flex justify-between items-center text-[11px]">
-                  <span className="text-slate-400 font-medium">Sitzungstyp:</span>
+                  <span className="text-slate-400 font-medium">{language === 'de' ? 'Sitzungstyp:' : 'Sign-in state:'}</span>
                   <span className="font-bold text-slate-700">
-                    {token ? 'Google Cloud' : 'Lokale Sandbox'}
+                    {token ? 'Google Account' : (language === 'de' ? 'Lokale Sandbox' : 'Local Sandbox')}
                   </span>
                 </div>
                 <div className="flex justify-between items-center text-[11px]">
-                  <span className="text-slate-400 font-medium">Synchronisierung:</span>
+                  <span className="text-slate-400 font-medium">{language === 'de' ? 'Konto-Status:' : 'Account Tier:'}</span>
+                  <span className="font-bold text-emerald-700">
+                    {language === 'de' ? '100% Kostenlos & Unbegrenzt' : '100% Free & Unlimited'}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center text-[11px]">
+                  <span className="text-slate-400 font-medium">{language === 'de' ? 'Synchronisierung:' : 'Cloud Synced:'}</span>
                   <span className={`font-bold ${
-                    syncStatus === 'synced' ? 'text-emerald-600' :
+                    syncStatus === 'synced' ? 'text-emerald-605' :
                     syncStatus === 'syncing' ? 'text-sky-600 animate-pulse' :
                     syncStatus === 'error' ? 'text-rose-600' : 'text-slate-500'
                   }`}>
-                    {syncStatus === 'synced' && 'Aktiv / Aktuell'}
-                    {syncStatus === 'syncing' && 'In Arbeit...'}
-                    {syncStatus === 'error' && 'Sync-Fehler'}
-                    {syncStatus === 'offline' && 'Nur lokal (Inaktiv)'}
+                    {syncStatus === 'synced' && (language === 'de' ? 'Aktiv / Aktuell' : 'Active / Up to date')}
+                    {syncStatus === 'syncing' && (language === 'de' ? 'In Arbeit...' : 'Syncing...')}
+                    {syncStatus === 'error' && (language === 'de' ? 'Sync-Fehler' : 'Sync error')}
+                    {syncStatus === 'offline' && (language === 'de' ? 'Nur lokal (Inaktiv)' : 'Offline storage')}
                   </span>
                 </div>
               </div>
             </div>
           </div>
 
+          {/* Language Selector block */}
+          <div className="bg-white border border-slate-200/60 rounded-xl p-5 shadow-xs">
+            <h2 className="text-xs font-extrabold text-slate-400 uppercase tracking-wider mb-2">
+              {language === 'de' ? 'Sprachauswahl' : 'Language Selection'}
+            </h2>
+            <p className="text-[11px] text-slate-500 leading-relaxed mb-4">
+              {language === 'de' ? 'Wähle deine bevorzugte Sprache für die Benutzeroberfläche:' : 'Configure your language locale preferred for the app views:'}
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={() => setLanguage('de')}
+                className={`py-1.5 px-3 border rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-all ${
+                  language === 'de' 
+                    ? 'bg-slate-50 border-slate-300 ring-1 ring-slate-300/30' 
+                    : 'bg-white border-slate-200 hover:bg-slate-50'
+                }`}
+              >
+                <span>🇩🇪</span>
+                <span>DE</span>
+              </button>
+              <button
+                onClick={() => setLanguage('en')}
+                className={`py-1.5 px-3 border rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-all ${
+                  language === 'en' 
+                    ? 'bg-slate-50 border-slate-300 ring-1 ring-slate-300/30' 
+                    : 'bg-white border-slate-200 hover:bg-slate-50'
+                }`}
+              >
+                <span>🇬🇧</span>
+                <span>EN</span>
+              </button>
+            </div>
+          </div>
+
           <div className="bg-slate-50 border border-slate-200/50 rounded-xl p-4.5">
             <h3 className="text-xs font-bold text-slate-800 flex items-center gap-1.5 mb-2">
-              <Shield className="w-3.5 h-3.5 text-sky-600" />
-              <span>Sicherheit &amp; Privatsphäre</span>
+              <Shield className="w-3.5 h-3.5 text-sky-600 animate-pulse" />
+              <span>{language === 'de' ? 'Sicherheit & Privatsphäre' : 'Security & Privacy'}</span>
             </h3>
-            <p className="text-[11px] text-slate-500 leading-relaxed">
-              Deine Daten verlassen deinen Browser nie zu fremden Servern. Jegliche Daten-Synchronisation verläuft direkt und verschlüsselt zwischen diesem Browser und deinem persönlichen, privaten Google Drive App-Ordner.
+            <p className="text-[11px] text-slate-505 leading-relaxed font-sans">
+              {language === 'de' 
+                ? 'Deine Daten verlassen deinen Browser nie zu fremden Servern. Jegliche Daten-Synchronisation verläuft direkt und verschlüsselt zwischen diesem Browser und deinem persönlichen, privaten Google Drive App-Ordner.'
+                : 'Your document logs and cards never visit our analytics servers. Synchronization process proceeds encrypted strictly between this browser instance and your secure Google Drive Storage sandbox.'}
             </p>
           </div>
         </div>
 
-        {/* Right Column: Google Drive & Stripe Options */}
+        {/* Right Column: Google Drive & Storage Options */}
         <div className="md:col-span-2 space-y-6">
           
           {/* Cloud Synchronization Section */}
@@ -210,23 +262,27 @@ export default function SettingsPage({
                 <div className={`p-1.5 rounded-md ${token ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-600'}`}>
                   {token ? <Cloud className="w-4 h-4" /> : <CloudOff className="w-4 h-4" />}
                 </div>
-                <h3 className="font-bold text-slate-800 text-sm">Google Drive Cloud-Anbindung</h3>
+                <h3 className="font-bold text-slate-800 text-sm">{language === 'de' ? 'Google Drive Cloud-Anbindung' : 'Google Drive Backup Sync'}</h3>
               </div>
               <span className={`text-[10px] uppercase font-extrabold tracking-wider px-2 py-0.5 rounded-full ${
                 token ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'bg-slate-100 text-slate-500 border border-slate-200/60'
               }`}>
-                {token ? 'Verbunden' : 'Lokal / Offline'}
+                {token ? (language === 'de' ? 'Verbunden' : 'Linked') : (language === 'de' ? 'Lokal / Offline' : 'Offline Mode')}
               </span>
             </div>
 
             <p className="text-xs text-notion-secondary leading-relaxed mb-4">
               {token ? (
                 <span>
-                  Dein Desktop ist mit deinem Google Drive (E-Mail: <strong>{user?.email}</strong>) gekoppelt. Alle Haftnotizen, Aufgabenlisten und benutzerdefinierten Dateien werden sicher im Hintergrund hochgeladen.
+                  {language === 'de' 
+                    ? `Dein Desktop ist mit deinem Google Drive (E-Mail: ${user?.email}) gekoppelt. Alle Haftnotizen, Aufgabenlisten und benutzerdefinierten Dateien werden sicher im Hintergrund hochgeladen.`
+                    : `Your workspace node is authorized to Google Drive (Account: ${user?.email}). Stickies, note pages, and custom folders synchronize to safety now.`}
                 </span>
               ) : (
                 <span>
-                  Koppele die Anwendung mit deinem Google Drive. Dadurch werden Haftnotizen, Textdokumente und Layouts völlig geräteübergreifend synchronisiert. Deine Passwörter oder sonstigen Dateien sind geschützt – DriveDeck nutzt ausschließlich einen abgeschotteten Anwendungsordner (appDataFolder).
+                  {language === 'de'
+                    ? 'Koppele die Anwendung mit deinem Google Drive. Dadurch werden Haftnotizen, Textdokumente und Layouts völlig geräteübergreifend synchronisiert. Deine Passwörter sind geschützt – DriveDeck nutzt eine abgeschottete Sandbox.'
+                    : 'Connect the application structure to your personal Google Drive account. Your notes, checklist decks, and canvas parameters adapt instantly across screens without passing through any third-party app servers.'}
                 </span>
               )}
             </p>
@@ -234,37 +290,36 @@ export default function SettingsPage({
             {token ? (
               <div className="bg-emerald-50/40 border border-emerald-100 rounded-lg p-3.5 mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                 <div className="text-[11px] leading-relaxed text-emerald-800">
-                  <p className="font-bold">☁️ Cloud-Speicher aktiv</p>
-                  <p className="opacity-90">Sichere Verbindung besteht. Keine unbeteiligten Server haben Einsicht oder Kontrolle.</p>
+                  <p className="font-bold">☁️ {language === 'de' ? 'Cloud-Speicher aktiv' : 'Cloud Storage Integration Approved'}</p>
+                  <p className="opacity-90">{language === 'de' ? 'Sichere Verbindung besteht. Keine unbeteiligten Server haben Einsicht.' : 'Your notes link safely direct to Google quota servers. 100% cloud-secure.'}</p>
                 </div>
                 <button
                   onClick={onDisconnectDrive}
                   className="px-3.5 py-1.5 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-600 hover:text-rose-700 text-xs font-bold rounded cursor-pointer transition-colors shrink-0"
                 >
-                  Verbindung trennen
+                  {language === 'de' ? 'Verbindung trennen' : 'Disconnect'}
                 </button>
               </div>
             ) : (
               <div className="bg-slate-50 border border-slate-150 rounded-lg p-3.5 mb-4">
                 <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center justify-between">
-                  <div className="text-[11px] leading-normal text-slate-600 max-w-md">
-                    <p className="font-bold">🌐 Lokale Sandbox-Datei aktiv</p>
-                    <p className="opacity-90">Deine Notizen werden derzeit in der lokalen Browser-Datenbank gespeichert. Melde dich bei Google an, um die automatische Sicherung zu starten.</p>
+                  <div className="text-[11px] leading-normal text-slate-605 max-w-md">
+                    <p className="font-bold">🌐 {language === 'de' ? 'Lokale Sandbox active' : 'Local Sandboxed Offline Run'}</p>
+                    <p className="opacity-90">{language === 'de' ? 'Deine Notizen werden derzeit in der lokalen Browser-Datenbank gespeichert. Melde dich bei Google an, um Backups zu starten.' : 'Your data resides locally on browser caches right now. Connect your Google account to secure cloud-level preservation.'}</p>
                   </div>
-                  <div className="flex flex-col gap-1.5 shrink-0">
+                  <div className="flex flex-col gap-1.5 shrink-0 font-sans">
                     <button
                       onClick={() => onConnectDrive('popup')}
                       className="px-3.5 py-1.5 bg-[#0288D1] hover:bg-[#0277bd] text-white text-xs font-bold rounded cursor-pointer shadow-xs transition-colors flex items-center justify-center gap-1.5"
                     >
                       <Cloud className="w-3.5 h-3.5" />
-                      <span>Drive verbinden</span>
+                      <span>{language === 'de' ? 'Drive verbinden' : 'Link Google Drive'}</span>
                     </button>
                     <button
                       onClick={() => onConnectDrive('redirect')}
-                      className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-500 hover:text-slate-700 text-[10px] font-medium rounded cursor-pointer transition-colors text-center"
-                      title="Falls Popup-Blocker die Kopplung stören"
+                      className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-505 hover:text-slate-700 text-[10px] font-medium rounded cursor-pointer transition-colors text-center font-sans"
                     >
-                      Verzeichnis-Redirect (Backup)
+                      {language === 'de' ? 'Verzeichnis-Redirect (Alternativ)' : 'Manual Redirect (Alternative)'}
                     </button>
                   </div>
                 </div>
@@ -272,202 +327,139 @@ export default function SettingsPage({
             )}
           </div>
 
-          {/* Premium & Invoice Stripe Section */}
+          {/* 100% Free & Unlimited Workspace Section */}
           <div className="bg-white border border-slate-200/60 rounded-xl p-5 shadow-xs overflow-hidden relative">
-            {/* Background Decorative Accent */}
-            <div className="absolute right-0 top-0 w-32 h-32 bg-sky-400/5 rounded-full filter blur-xl pointer-events-none" />
-
             <div className="flex items-center space-x-2 mb-3.5">
-              <div className="p-1.5 rounded-md bg-amber-50 text-amber-600">
-                <CreditCard className="w-4 h-4" />
+              <div className="p-1.5 rounded-md bg-emerald-50 text-emerald-600">
+                <Sparkles className="w-4 h-4" />
               </div>
-              <h3 className="font-bold text-slate-800 text-sm">Zahlungen &amp; Premium-Lizenzen (Stripe)</h3>
+              <h3 className="font-bold text-slate-800 text-sm">
+                {language === 'de' ? '100% Kostenlos & Unbegrenzt' : '100% Free & Unlimited Access'}
+              </h3>
+              <span className="bg-emerald-100 text-emerald-800 border border-emerald-300 text-[10px] font-black px-2 py-0.5 rounded-full uppercase tracking-wider">
+                {language === 'de' ? 'Dauerhaft Gratis' : 'Forever Free'}
+              </span>
             </div>
 
-            <p className="text-xs text-notion-secondary leading-relaxed mb-5">
-              Schalte fortgeschrittene Funktionen wie API-Organisation, Team-Vorschau und unbegrenzten Google Kalender Sync frei. Die Abrechnung erfolgt sicher über unseren Partner <strong>Stripe billing</strong>.
+            <p className="text-xs text-notion-secondary leading-relaxed mb-4">
+              {language === 'de' 
+                ? 'DriveDeck ist vollkommen kostenlos nutzbar – ohne Abonnements, ohne Testphasen-Beschränkungen und ohne versteckte Gebühren. Sämtliche Synchronisierungen, Kanban-Boards, Sprachnotizen und Google Tasks stehen dir dauerhaft und unbegrenzt zur Verfügung.' 
+                : 'DriveDeck is 100% free forever – no subscriptions, no evaluation expirations, and no hidden fees. All real-time synchronizations, Kanban boards, audio dictations, and Google Tasks features are completely unlocked.'}
             </p>
 
-            {user && !isPremium && (() => {
-              const getTrialStyle = () => {
-                if (isTrialExpired) {
-                  return {
-                    container: 'bg-rose-50 border-rose-200 text-rose-950',
-                    iconColor: 'text-rose-600 animate-pulse',
-                    badge: 'bg-rose-100 text-rose-900'
-                  };
-                }
-                const days = trialDaysLeft ?? 90;
-                if (days <= 30) {
-                  return {
-                    container: 'bg-rose-50/80 border-rose-200 text-rose-900',
-                    iconColor: 'text-rose-600 animate-pulse',
-                    badge: 'bg-rose-100/80 text-rose-950'
-                  };
-                }
-                if (days <= 60) {
-                  return {
-                    container: 'bg-amber-50/80 border-amber-200 text-amber-900',
-                    iconColor: 'text-amber-600',
-                    badge: 'bg-amber-100 text-amber-950'
-                  };
-                }
-                return {
-                  container: 'bg-emerald-50/60 border-emerald-100/80 text-emerald-900',
-                  iconColor: 'text-emerald-600',
-                  badge: 'bg-emerald-100/80 text-emerald-950'
-                };
-              };
+            <div className="bg-emerald-50/50 border border-emerald-100 rounded-lg p-3.5 space-y-2 text-xs text-emerald-900">
+              <div className="flex items-center gap-2">
+                <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                <span>{language === 'de' ? 'Unbegrenzte Seiten, Notizen, Alben und Aufgaben' : 'Unlimited pages, notes, albums, and task lists'}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                <span>{language === 'de' ? 'Vollständige Google Drive Synchronisation (Bring Your Own Storage)' : 'Seamless Google Drive synchronization (Bring Your Own Storage)'}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                <span>{language === 'de' ? '100% Datenschutz: Keine Drittserver, keine Werbung, kein Datenverkauf' : '100% Privacy: Zero third-party databases, no tracking, no ads'}</span>
+              </div>
+            </div>
+          </div>
 
-              const style = getTrialStyle();
+          {/* Push Notifications & Task Reminders Section */}
+          <div className="bg-white border border-slate-200/60 rounded-xl p-5 shadow-xs">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center space-x-2">
+                <div className="p-1.5 rounded-md bg-amber-50 text-amber-600">
+                  <Bell className="w-4 h-4" />
+                </div>
+                <h3 className="font-bold text-slate-800 text-sm">
+                  {language === 'de' ? 'Push-Benachrichtigungen & Aufgaben-Erinnerungen' : 'Push Notifications & Task Reminders'}
+                </h3>
+              </div>
+              <span className={`text-[10px] uppercase font-extrabold tracking-wider px-2 py-0.5 rounded-full border ${
+                notificationPerm === 'granted'
+                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                  : notificationPerm === 'denied'
+                  ? 'bg-rose-50 text-rose-700 border-rose-200'
+                  : 'bg-slate-100 text-slate-600 border-slate-200'
+              }`}>
+                {notificationPerm === 'granted'
+                  ? (language === 'de' ? 'Aktiv 🔔' : 'Active 🔔')
+                  : notificationPerm === 'denied'
+                  ? (language === 'de' ? 'Blockiert ❌' : 'Blocked ❌')
+                  : (language === 'de' ? 'Inaktiv' : 'Inactive')}
+              </span>
+            </div>
 
-              return (
-                <div className={`p-4 rounded-lg mb-5 text-xs leading-relaxed border animate-in slide-in-from-top-3 duration-200 ${style.container}`}>
-                  <div className="flex items-center gap-2 font-bold mb-1.5">
-                    <Info className={`w-4 h-4 shrink-0 ${style.iconColor}`} />
-                    <span>{isTrialExpired ? 'Testphase abgelaufen (Hintergrund-Synchronisation pausiert)' : 'Kostenlose Testphase aktiv (3 Monate gratis)'}</span>
-                  </div>
-                  {isTrialExpired ? (
-                    <p>
-                      Deine 3-monatige Testphase ist leider abgelaufen. Die automatische Echtzeit-Synchronisation im Hintergrund zwischen deiner IndexedDB und Google Drive wird <strong>pausiert</strong>, bis du ein Abonnement aktivierst. Deine Notizen und Alben sind weiterhin zu 100% lokal im Browser abruf- und editierbar.
-                    </p>
+            <p className="text-xs text-notion-secondary leading-relaxed mb-4">
+              {language === 'de'
+                ? 'Erhalte rechtzeitige System-Erinnerungen für fällige Aufgaben (Google Tasks) und Kanban-Karten mit Fälligkeitsdatum & Uhrzeit – auch wenn du in einem anderen Tab oder Fenster arbeitest.'
+                : 'Receive timely desktop reminders for due tasks (Google Tasks) and Kanban cards with scheduled dates & times – even when working in another tab.'}
+            </p>
+
+            <div className="bg-slate-50 border border-slate-150 rounded-lg p-3.5 space-y-3">
+              <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center justify-between">
+                <div className="text-[11px] leading-relaxed text-slate-600">
+                  <p className="font-bold text-slate-800">
+                    {notificationPerm === 'granted'
+                      ? (language === 'de' ? '✅ Browser-Benachrichtigungen sind aktiv' : '✅ Browser push notifications enabled')
+                      : (language === 'de' ? '🔔 Benachrichtigungen im Browser erlauben' : '🔔 Allow desktop notifications in browser')}
+                  </p>
+                  <p className="opacity-90">
+                    {notificationPerm === 'granted'
+                      ? (language === 'de' ? 'DriveDeck erinnert dich automatisch bei Fälligkeit.' : 'DriveDeck will notify you automatically when due.')
+                      : (language === 'de' ? 'Klicke auf den Button, um die Systemberechtigung im Browser anzufordern.' : 'Click to prompt browser permission for notifications.')}
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  {notificationPerm !== 'granted' ? (
+                    <button
+                      type="button"
+                      onClick={handleRequestPush}
+                      className="px-3.5 py-2 bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold rounded-lg cursor-pointer shadow-xs transition-colors flex items-center gap-1.5"
+                    >
+                      <Bell className="w-3.5 h-3.5" />
+                      <span>{language === 'de' ? 'Aktivieren' : 'Enable'}</span>
+                    </button>
                   ) : (
-                    <p>
-                      Dir stehen die ersten 3 Monate vollkommen kostenlos zur Verfügung. Du hast aktuell noch <strong className={`font-extrabold px-1.5 py-0.5 rounded border border-black/5 ${style.badge}`}>{trialDaysLeft !== null ? `${trialDaysLeft} Tage` : '---'}</strong> übrig, in denen dein Google Drive vollautomatisch synchronisiert wird.
-                    </p>
+                    <button
+                      type="button"
+                      onClick={handleSendTestNotification}
+                      className="px-3.5 py-2 bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold rounded-lg cursor-pointer shadow-xs transition-colors flex items-center gap-1.5"
+                    >
+                      <Bell className="w-3.5 h-3.5" />
+                      <span>{testSent ? (language === 'de' ? 'Gesendet! ✅' : 'Sent! ✅') : (language === 'de' ? 'Test senden 🔔' : 'Send Test 🔔')}</span>
+                    </button>
                   )}
                 </div>
-              );
-            })()}
-
-            {isPremium ? (
-              <div className="bg-emerald-50/60 border border-emerald-100 rounded-lg p-4 mb-4 text-xs text-emerald-800 animate-in zoom-in-95 leading-relaxed">
-                <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-2 font-bold">
-                    <Sparkles className="w-4 h-4 text-emerald-600" />
-                    <span>Premium Plus freigeschaltet!</span>
-                  </div>
-                  <button
-                    onClick={onResetPremium}
-                    className="text-[10px] hover:underline text-slate-500 hover:text-rose-600 font-bold transition-all bg-slate-100 hover:bg-rose-50 border border-slate-200 px-2.5 py-1 rounded"
-                    title="Premium-Status zum Testen zurücksetzen"
-                  >
-                    Status zurücksetzen
-                  </button>
-                </div>
-                Deine Lizenz wurde erfolgreich mit deinem Google-Konto gekoppelt. Alle Teamfunktionen und Integrationsfeatures stehen dir in dieser Sitzung uneingeschränkt zur Verfügung. Vielen Dank für dein Vertrauen!
               </div>
-            ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-5">
-                {/* Monats-Abo */}
-                <div 
-                  onClick={() => setSelectedPlan('monthly')}
-                  className={`border p-3.5 rounded-lg cursor-pointer transition-all flex flex-col justify-between ${
-                    selectedPlan === 'monthly' 
-                      ? 'border-[#0288D1] bg-sky-50/10 ring-1 ring-[#0288D1]/30' 
-                      : 'border-slate-100 hover:bg-slate-50'
-                  }`}
-                >
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-[10px] text-slate-400 uppercase font-bold tracking-wider">Monats-Abo</span>
-                      {selectedPlan === 'monthly' && <Check className="w-3.5 h-3.5 text-[#0288D1]" />}
-                    </div>
-                    <p className="text-[10px] text-slate-500 leading-normal mb-3">Maximale Flexibilität. Monatlich kündbar, perfekt für den flexiblen Einsatz.</p>
-                  </div>
-                  <span className="text-xs font-bold text-slate-800 self-start">4.90$<span className="text-[9px] font-normal text-slate-400"> / Monat</span></span>
-                </div>
 
-                {/* Jahres-Abo */}
-                <div 
-                  onClick={() => setSelectedPlan('yearly')}
-                  className={`border p-3.5 rounded-lg cursor-pointer transition-all flex flex-col justify-between relative ${
-                    selectedPlan === 'yearly' 
-                      ? 'border-[#0288D1] bg-sky-50/10 ring-1 ring-[#0288D1]/30' 
-                      : 'border-slate-100 hover:bg-slate-50'
-                  }`}
-                >
-                  <div className="absolute -top-2 right-2 bg-sky-500 text-white px-1.5 py-0.2 rounded-full text-[7.5px] font-bold uppercase tracking-wider shadow-xs animate-pulse">
-                    Empfohlen
-                  </div>
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-[10px] text-sky-600 uppercase font-bold tracking-wider flex items-center gap-0.5">
-                        <span>Jahres-Abo</span>
-                        <Sparkles className="w-2.5 h-2.5 text-amber-500 fill-current" />
-                      </span>
-                      {selectedPlan === 'yearly' && <Check className="w-3.5 h-3.5 text-[#0288D1]" />}
-                    </div>
-                    <div className="text-[8px] text-emerald-700 font-bold mb-1.5 bg-emerald-50 py-0.2 px-1 border border-emerald-100 rounded inline-block">
-                      2 Monate kostenlos
-                    </div>
-                    <p className="text-[10px] text-slate-500 leading-normal mb-3">Spare bares Geld gegenüber dem Monatsabo. Optimal für kontinuierliche Planung.</p>
-                  </div>
-                  <span className="text-xs font-bold text-slate-800 self-start">49.00$<span className="text-[9px] font-normal text-slate-400"> / Jahr</span></span>
-                </div>
-
-                {/* Einmalkauf */}
-                <div 
-                  onClick={() => setSelectedPlan('lifetime')}
-                  className={`border p-3.5 rounded-lg cursor-pointer transition-all flex flex-col justify-between ${
-                    selectedPlan === 'lifetime' 
-                      ? 'border-[#0288D1] bg-sky-50/10 ring-1 ring-[#0288D1]/30' 
-                      : 'border-slate-100 hover:bg-slate-50'
-                  }`}
-                >
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-[10px] text-slate-400 uppercase font-bold tracking-wider">Einmalkauf</span>
-                      {selectedPlan === 'lifetime' && <Check className="w-3.5 h-3.5 text-[#0288D1]" />}
-                    </div>
-                    <p className="text-[10px] text-slate-500 leading-normal mb-3">Einmal kaufen, immer nutzen. Inklusive aller zukünftigen Updates, ganz ohne Abo.</p>
-                  </div>
-                  <span className="text-xs font-bold text-slate-800 self-start">139.00$<span className="text-[9px] font-normal text-slate-400"> / Lebenslang</span></span>
-                </div>
-              </div>
-            )}
-
-            {stripeError && (
-              <div className="bg-rose-50 border border-rose-100 text-rose-800 rounded-lg p-3 text-xs mb-4 font-sans text-left leading-relaxed">
-                <span className="font-bold">Stripe Konfigurationsfehler:</span> {stripeError}
-                <div className="mt-1.5 opacity-90 text-[11px] leading-normal font-medium bg-white/50 p-2 rounded border border-rose-150">
-                  ⚠️ Um Stripe in deinem Workspace zu testen, musst du in den <strong>Einstellungen (Secrets panel)</strong> die folgenden Keys hinterlegen:
-                  <ul className="list-disc pl-3 mt-1 space-y-0.5">
-                    <li>`STRIPE_SECRET_KEY` (aus deinem Stripe-Dashboard)</li>
-                    <li>`STRIPE_PRICE_MONTHLY` (z. B. price_1...)</li>
-                    <li>`STRIPE_PRICE_YEARLY` (z. B. price_2...)</li>
-                    <li>`STRIPE_PRICE_LIFETIME` (z. B. price_3...)</li>
-                  </ul>
-                </div>
-              </div>
-            )}
-
-            {!isPremium && (
-              <div className="flex items-center justify-between pt-1">
-                <div className="flex items-center gap-1 text-[10px] text-slate-400 font-medium">
-                  <Info className="w-3.5 h-3.5 shrink-0" />
-                  <span>Sichere Übertragung via Stripe billing</span>
+              {/* Sound toggle row */}
+              <div className="pt-2 border-t border-slate-200/60 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  {soundEnabled ? (
+                    <Volume2 className="w-4 h-4 text-sky-600 shrink-0" />
+                  ) : (
+                    <VolumeX className="w-4 h-4 text-slate-400 shrink-0" />
+                  )}
+                  <span className="text-xs font-medium text-slate-700">
+                    {language === 'de' ? 'Signalton bei Fälligkeit abspielen' : 'Play audio chime on due reminders'}
+                  </span>
                 </div>
                 <button
                   type="button"
-                  onClick={handleStripeCheckout}
-                  disabled={stripeLoading}
-                  className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold rounded cursor-pointer transition-colors shadow-xs flex items-center gap-1.5 disabled:opacity-50"
+                  onClick={handleToggleSound}
+                  className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                    soundEnabled ? 'bg-sky-600' : 'bg-slate-200'
+                  }`}
                 >
-                  {stripeLoading ? (
-                    <>
-                      <div className="w-3 h-3 border-2 border-slate-300 border-t-white rounded-full animate-spin" />
-                      <span>Verbinde Stripe...</span>
-                    </>
-                  ) : (
-                    <>
-                      <span>Mit Stripe upgrade erhalten</span>
-                      <ArrowRight className="w-3.5 h-3.5" />
-                    </>
-                  )}
+                  <span
+                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                      soundEnabled ? 'translate-x-4' : 'translate-x-0'
+                    }`}
+                  />
                 </button>
               </div>
-            )}
+            </div>
           </div>
 
           {/* Backup & Data Portability Section */}
@@ -477,37 +469,39 @@ export default function SettingsPage({
                 <div className="p-1.5 rounded-md bg-sky-50 text-[#0288D1]">
                   <Database className="w-4 h-4" />
                 </div>
-                <h3 className="font-bold text-slate-800 text-sm">Daten-Backup & Portabilität</h3>
+                <h3 className="font-bold text-slate-800 text-sm">{language === 'de' ? 'Daten-Backup & Portabilität' : 'Data Preservation & Security Backup'}</h3>
               </div>
               <span className="text-[10px] uppercase font-extrabold tracking-wider px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 border border-slate-200/60">
-                100% Exportierbar
+                100% Exportable
               </span>
             </div>
 
             <p className="text-xs text-notion-secondary leading-relaxed mb-4">
-              Deine Notizen, Alben, Haftnotizen und Aufgabenlisten gehören ausschließlich dir. Da alle Daten dezentral in deiner lokalen Browser-Datenbank (IndexedDB) und in deinem persönlichen Google Drive abgelegt sind, kannst du sie hier jederzeit vollständig in einem standardisierten, menschenlesbaren Format herunterladen (kein Lock-In).
+              {language === 'de' 
+                ? 'Deine Notizen, Alben, Haftnotizen und Aufgabenlisten gehören ausschließlich dir. Da alle Daten dezentral abgelegt sind, kannst du sie hier jederzeit vollständig in einem standardisierten, menschenlesbaren Format herunterladen.'
+                : 'Your notebooks, customized layouts, sticker boards, and planner tasks belong strictly on your storage nodes. Download them here in standard open JSON layout anytime. Zero locker lock-in.'}
             </p>
 
             <div className="bg-slate-50 border border-slate-150 rounded-lg p-3.5 flex flex-col sm:flex-row gap-3 items-start sm:items-center justify-between">
-              <div className="text-[11px] leading-relaxed text-slate-600 max-w-md">
-                <p className="font-bold">📥 Vollständige Rohdaten sichern</p>
-                <p className="opacity-90">Sichert all deine Seiten, Strukturen, Alben und Aufgaben in einer einzigen strukturierten JSON-Datei, die universell importierbar ist.</p>
+              <div className="text-[11px] leading-relaxed text-slate-606 max-w-md">
+                <p className="font-bold">📥 {language === 'de' ? 'Vollständiges Rohdaten-Backup' : 'Assemble Raw Data Core'}</p>
+                <p className="opacity-90">{language === 'de' ? 'Sichert all deine Seiten, Alben, Skizzen und Aufgaben in einer einzigen JSON-Datei.' : 'Compiles all note pages, albums, sticky notes, and checklist boards into a structured JSON file.'}</p>
               </div>
               <button
                 type="button"
                 onClick={handleExportData}
                 disabled={isExporting}
-                className="w-full sm:w-auto px-4 py-2.5 bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold rounded cursor-pointer shadow-xs transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50 shrink-0"
+                className="w-full sm:w-auto px-4 py-2.5 bg-sky-650 hover:bg-sky-700 text-white text-xs font-bold rounded cursor-pointer shadow-xs transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50 shrink-0 font-sans"
               >
                 {isExporting ? (
                   <>
                     <div className="w-3.5 h-3.5 border-2 border-slate-300 border-t-white rounded-full animate-spin" />
-                    <span>Lese Daten...</span>
+                    <span>{language === 'de' ? 'Lese Daten...' : 'Compiling...'}</span>
                   </>
                 ) : (
                   <>
                     <Download className="w-3.5 h-3.5" />
-                    <span>Vollständiges Backup (JSON)</span>
+                    <span>{language === 'de' ? 'Vollständiges Backup (JSON)' : 'Full Backup (JSON)'}</span>
                   </>
                 )}
               </button>

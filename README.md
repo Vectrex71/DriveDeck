@@ -15,6 +15,8 @@ By using a **"Bring Your Own Cloud" (BYOC)** architecture, DriveDeck stores all 
 
 **No external database. No subscription fees. No tracking. Complete data ownership.**
 
+<img width="1628" height="1003" alt="Screenshot 2026-09-18 16 57 25" src="https://github.com/user-attachments/assets/a7072d4e-299e-4145-9bdc-ac24178f9ce9" />
+
 ---
 
 ## ✨ Features
@@ -61,6 +63,8 @@ By using a **"Bring Your Own Cloud" (BYOC)** architecture, DriveDeck stores all 
 
 - 🌐 **Bilingual (English & German)**
   - Full internationalization support with instant language switching in Settings.
+
+<img width="1919" height="1019" alt="image" src="https://github.com/user-attachments/assets/16b40bb2-000f-4aa5-a700-cfde7abacf47" />
 
 ---
 
